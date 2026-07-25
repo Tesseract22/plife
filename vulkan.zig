@@ -20,6 +20,7 @@ swapchain       : v.SwapchainKHR = .null_handle,
 image_views     : []v.ImageView = &.{},
 vert            : v.ShaderModule = .null_handle,
 frag            : v.ShaderModule = .null_handle,
+render_pass     : v.RenderPass = .null_handle,
 // pub fn init_window(w: u32, h: u32, name: []const u8) void {
 //
 // }
@@ -283,4 +284,49 @@ pub fn init_shader_modules() !ShaderModules {
     state.vert = try create_shader_module(@alignCast(@embedFile("shader.spv")));
     state.frag = try create_shader_module(@alignCast(@embedFile("shader.spv")));
     return .{ .vert = state.vert, .frag = state.frag };
+}
+
+pub fn init_render_pass(device: Device) !v.RenderPass {
+    const color_attachment = v.AttachmentDescription {
+        .format = state.format.format,
+        .samples = .{ .@"1" = true },
+        .load_op = .clear,
+        .store_op = .store,
+        .stencil_load_op = .dont_care,
+        .stencil_store_op = .dont_care,
+        .initial_layout = .@"undefined",
+        .final_layout = .present_src_khr,
+    };
+
+    const color_attachment_ref = v.AttachmentReference {
+        .attachment = 0,
+        .layout = .color_attachment_optimal,
+    };
+
+    const subpass = v.SubpassDescription {
+        .pipeline_bind_point = .graphics,
+        .color_attachment_count = 1,
+        .p_color_attachments = @ptrCast(&color_attachment_ref),
+    };
+
+    const subpass_dep = v.SubpassDependency {
+        .src_subpass = v.SUBPASS_EXTERNAL,
+        .dst_subpass = 0,
+        .src_stage_mask = .{ .color_attachment_output = true },
+        .src_access_mask = .{},
+        .dst_stage_mask = .{ .color_attachment_output = true },
+        .dst_access_mask = .{ .color_attachment_write = true },
+    };
+
+    const render_pass_info = v.RenderPassCreateInfo {
+        .attachment_count = 1,
+        .p_attachments = @ptrCast(&color_attachment),
+        .subpass_count = 1,
+        .p_subpasses = @ptrCast(&subpass),
+        .dependency_count = 1,
+        .p_dependencies = &.{subpass_dep},
+    };
+
+    state.render_pass = try device.createRenderPass(&render_pass_info, null);
+    return state.render_pass;
 }

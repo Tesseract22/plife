@@ -31,7 +31,6 @@ pub fn main(init: std.process.Init) !void {
     const device = try vulkan.init_device(arena, WINDOW_W, WINDOW_H);
     defer device.destroyDevice(null);
     const graphics_family = vulkan.state.graphics_family;
-    const format = vulkan.state.format;
     const extent = vulkan.state.extent;
 
     const queues = vulkan.init_queues(device);
@@ -68,8 +67,8 @@ pub fn main(init: std.process.Init) !void {
         .extent = extent,
     };
 
-    const pipeline_layout, const render_pass,
-    const graphics_pipeline = blk: {
+    const render_pass = try vulkan.init_render_pass(device);
+    const pipeline_layout, const graphics_pipeline = blk: {
         const vert_create_info = v.PipelineShaderStageCreateInfo {
             .stage = .{ .vertex = true },
             .module = vert,
@@ -148,51 +147,6 @@ pub fn main(init: std.process.Init) !void {
 
         const pipeline_layout = try device.createPipelineLayout(&.{}, null);
 
-        //
-        // Create Render Pass
-        //
-        const color_attachment = v.AttachmentDescription {
-            .format = format.format,
-            .samples = .{ .@"1" = true },
-            .load_op = .clear,
-            .store_op = .store,
-            .stencil_load_op = .dont_care,
-            .stencil_store_op = .dont_care,
-            .initial_layout = .@"undefined",
-            .final_layout = .present_src_khr,
-        };
-
-        const color_attachment_ref = v.AttachmentReference {
-            .attachment = 0,
-            .layout = .color_attachment_optimal,
-        };
-
-        const subpass = v.SubpassDescription {
-            .pipeline_bind_point = .graphics,
-            .color_attachment_count = 1,
-            .p_color_attachments = @ptrCast(&color_attachment_ref),
-        };
-
-        const subpass_dep = v.SubpassDependency {
-            .src_subpass = v.SUBPASS_EXTERNAL,
-            .dst_subpass = 0,
-            .src_stage_mask = .{ .color_attachment_output = true },
-            .src_access_mask = .{},
-            .dst_stage_mask = .{ .color_attachment_output = true },
-            .dst_access_mask = .{ .color_attachment_write = true },
-        };
-
-        const render_pass_info = v.RenderPassCreateInfo {
-            .attachment_count = 1,
-            .p_attachments = @ptrCast(&color_attachment),
-            .subpass_count = 1,
-            .p_subpasses = @ptrCast(&subpass),
-            .dependency_count = 1,
-            .p_dependencies = &.{subpass_dep},
-        };
-
-        const render_pass = try device.createRenderPass(&render_pass_info, null);
-
         const graphics_pipeline_info = v.GraphicsPipelineCreateInfo {
             .stage_count = 2,
             .p_stages = &.{ vert_create_info, frag_create_info },
@@ -211,7 +165,7 @@ pub fn main(init: std.process.Init) !void {
         var graphics_pipeline: [1]v.Pipeline = undefined;
         _ = try device.createGraphicsPipelines(.null_handle, &.{graphics_pipeline_info}, null, &graphics_pipeline);
 
-        break :blk .{ pipeline_layout, render_pass, graphics_pipeline[0] };
+        break :blk .{ pipeline_layout, graphics_pipeline[0] };
     };
     defer {
         device.destroyPipelineLayout(pipeline_layout, null);
