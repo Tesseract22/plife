@@ -263,11 +263,11 @@ const fatal = std.process.fatal;
 const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 
-pub fn create_shader_module(device: Device, src: [] align(4) const u8) !v.ShaderModule {
+pub fn create_shader_module(src: []align(4) const u8) !v.ShaderModule {
     const u32_slice = std.mem.bytesAsSlice(u32, src);
     const create_info = v.ShaderModuleCreateInfo {
         .code_size = src.len,
         .p_code = u32_slice.ptr,
     };
-    return device.createShaderModule(&create_info, null);
+    return state.device.createShaderModule(&create_info, null);
 }
