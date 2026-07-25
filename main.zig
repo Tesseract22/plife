@@ -30,7 +30,6 @@ pub fn main(init: std.process.Init) !void {
     //
     const device = try vulkan.init_device(arena, WINDOW_W, WINDOW_H);
     defer device.destroyDevice(null);
-    const graphics_family = vulkan.state.graphics_family;
     const extent = vulkan.state.extent;
 
     const queues = vulkan.init_queues(device);
@@ -179,10 +178,7 @@ pub fn main(init: std.process.Init) !void {
     //
     // Command
     //
-    const command_pool = try device.createCommandPool(&.{
-        .flags = .{ .reset_command_buffer = true },
-        .queue_family_index = graphics_family,
-    }, null);
+    const command_pool = try vulkan.init_command_pool(device);
     defer device.destroyCommandPool(command_pool, null);
 
     const MAX_FRAMES_IN_FLIGHT = 3;

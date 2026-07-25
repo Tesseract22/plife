@@ -22,6 +22,7 @@ vert            : v.ShaderModule = .null_handle,
 frag            : v.ShaderModule = .null_handle,
 render_pass     : v.RenderPass = .null_handle,
 frame_buffers   : []v.Framebuffer = &.{},
+command_pool    : v.CommandPool = .null_handle,
 // pub fn init_window(w: u32, h: u32, name: []const u8) void {
 //
 // }
@@ -346,4 +347,12 @@ pub fn init_frame_buffers(arena: std.mem.Allocator, device: Device) ![]v.Framebu
         }, null);
     }
     return state.frame_buffers;
+}
+
+pub fn init_command_pool(device: Device) !v.CommandPool {
+    state.command_pool = try device.createCommandPool(&.{
+        .flags = .{ .reset_command_buffer = true },
+        .queue_family_index = state.graphics_family,
+    }, null);
+    return state.command_pool;
 }
