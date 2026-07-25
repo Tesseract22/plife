@@ -173,20 +173,7 @@ pub fn main(init: std.process.Init) !void {
         device.destroyPipeline(graphics_pipeline, null);
     }
 
-    const frame_buffers = arena.alloc(v.Framebuffer, image_views.len) catch @panic("OOM");
-    for (image_views, frame_buffers) |image_view, *frame_buffer| {
-        const attachments: []const v.ImageView = &.{
-            image_view,
-        };
-        frame_buffer.* = try device.createFramebuffer(&.{
-            .render_pass = render_pass,
-            .attachment_count = @intCast(attachments.len),
-            .p_attachments = attachments.ptr,
-            .width = extent.width,
-            .height = extent.height,
-            .layers = 1,
-        }, null);
-    }
+    const frame_buffers = try vulkan.init_frame_buffers(arena, device);
     defer for (frame_buffers) |frame_buffer| device.destroyFramebuffer(frame_buffer, null);
 
     //

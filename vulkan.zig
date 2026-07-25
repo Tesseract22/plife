@@ -21,6 +21,7 @@ image_views     : []v.ImageView = &.{},
 vert            : v.ShaderModule = .null_handle,
 frag            : v.ShaderModule = .null_handle,
 render_pass     : v.RenderPass = .null_handle,
+frame_buffers   : []v.Framebuffer = &.{},
 // pub fn init_window(w: u32, h: u32, name: []const u8) void {
 //
 // }
@@ -329,4 +330,20 @@ pub fn init_render_pass(device: Device) !v.RenderPass {
 
     state.render_pass = try device.createRenderPass(&render_pass_info, null);
     return state.render_pass;
+}
+
+pub fn init_frame_buffers(arena: std.mem.Allocator, device: Device) ![]v.Framebuffer {
+    state.frame_buffers = try arena.alloc(v.Framebuffer, state.image_views.len);
+    for (state.image_views, state.frame_buffers) |image_view, *frame_buffer| {
+        const attachments: []const v.ImageView = &.{image_view};
+        frame_buffer.* = try device.createFramebuffer(&.{
+            .render_pass = state.render_pass,
+            .attachment_count = @intCast(attachments.len),
+            .p_attachments = attachments.ptr,
+            .width = state.extent.width,
+            .height = state.extent.height,
+            .layers = 1,
+        }, null);
+    }
+    return state.frame_buffers;
 }
