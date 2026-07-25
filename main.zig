@@ -181,14 +181,8 @@ pub fn main(init: std.process.Init) !void {
     const command_pool = try vulkan.init_command_pool(device);
     defer device.destroyCommandPool(command_pool, null);
 
-    const MAX_FRAMES_IN_FLIGHT = 3;
-
-    var command_buffers: [MAX_FRAMES_IN_FLIGHT]v.CommandBuffer = undefined;
-    try device.allocateCommandBuffers(&.{
-        .command_pool = command_pool,
-        .level = .primary,
-        .command_buffer_count = MAX_FRAMES_IN_FLIGHT,
-    }, &command_buffers);
+    const MAX_FRAMES_IN_FLIGHT = vulkan.MAX_FRAMES_IN_FLIGHT;
+    const command_buffers = try vulkan.init_command_buffers(device);
 
     //
     // Sync primitives

@@ -23,9 +23,11 @@ frag            : v.ShaderModule = .null_handle,
 render_pass     : v.RenderPass = .null_handle,
 frame_buffers   : []v.Framebuffer = &.{},
 command_pool    : v.CommandPool = .null_handle,
+command_buffers : [MAX_FRAMES_IN_FLIGHT]v.CommandBuffer = undefined,
 // pub fn init_window(w: u32, h: u32, name: []const u8) void {
 //
 // }
+pub const MAX_FRAMES_IN_FLIGHT = 3;
 pub var state = Vulkan {};
 const vkGetInstanceProcAddr = @extern(v.PfnGetInstanceProcAddr, .{
     .name = "vkGetInstanceProcAddr",
@@ -355,4 +357,15 @@ pub fn init_command_pool(device: Device) !v.CommandPool {
         .queue_family_index = state.graphics_family,
     }, null);
     return state.command_pool;
+}
+
+pub const CommandBuffers = [MAX_FRAMES_IN_FLIGHT]v.CommandBuffer;
+
+pub fn init_command_buffers(device: Device) !CommandBuffers {
+    try device.allocateCommandBuffers(&.{
+        .command_pool = state.command_pool,
+        .level = .primary,
+        .command_buffer_count = MAX_FRAMES_IN_FLIGHT,
+    }, &state.command_buffers);
+    return state.command_buffers;
 }
