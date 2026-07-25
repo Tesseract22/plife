@@ -51,8 +51,9 @@ pub fn main(init: std.process.Init) !void {
     //
     // Create Shader Module
     //
-    const vert = try vulkan.create_shader_module(@alignCast(@embedFile("shader.spv")));
-    const frag = try vulkan.create_shader_module(@alignCast(@embedFile("shader.spv")));
+    const shaders = try vulkan.init_shader_modules();
+    const vert = shaders.vert;
+    const frag = shaders.frag;
     defer {
         device.destroyShaderModule(vert, null); device.destroyShaderModule(frag, null);
     }

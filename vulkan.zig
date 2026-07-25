@@ -18,6 +18,8 @@ graphics_queue  : v.Queue = .null_handle,
 present_queue   : v.Queue = .null_handle,
 swapchain       : v.SwapchainKHR = .null_handle,
 image_views     : []v.ImageView = &.{},
+vert            : v.ShaderModule = .null_handle,
+frag            : v.ShaderModule = .null_handle,
 // pub fn init_window(w: u32, h: u32, name: []const u8) void {
 //
 // }
@@ -270,4 +272,15 @@ pub fn create_shader_module(src: []align(4) const u8) !v.ShaderModule {
         .p_code = u32_slice.ptr,
     };
     return state.device.createShaderModule(&create_info, null);
+}
+
+pub const ShaderModules = struct {
+    vert: v.ShaderModule,
+    frag: v.ShaderModule,
+};
+
+pub fn init_shader_modules() !ShaderModules {
+    state.vert = try create_shader_module(@alignCast(@embedFile("shader.spv")));
+    state.frag = try create_shader_module(@alignCast(@embedFile("shader.spv")));
+    return .{ .vert = state.vert, .frag = state.frag };
 }
