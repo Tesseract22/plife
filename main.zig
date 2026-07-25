@@ -16,7 +16,7 @@ pub fn main(init: std.process.Init) !void {
     //
     // Create Instance
     //
-    const instance = vulkan.init_instance();
+    const instance = try vulkan.init_instance();
     defer vulkan.cleanup();
 
     //
@@ -28,180 +28,20 @@ pub fn main(init: std.process.Init) !void {
     //
     // Create Logical Device, and Queye Families
     //
-    const device_handle,
-    const graphics_family, const present_family,
-    const surface_details,
-    const format, const present_mode,
-    const extent = blk: {
-        var device_count: u32 = 0;
-        _ = try instance.enumeratePhysicalDevices(&device_count, null);
-        log.info("found {} devices: ", .{device_count});
-        if (device_count == 0) @panic("no devic found");
-        const devices = arena.alloc(v.PhysicalDevice, device_count) catch @panic("OOM");
-        _ = instance.enumeratePhysicalDevices(&device_count, devices.ptr) catch unreachable;
-        const device = devices[0];
-
-        var queue_family_count: u32 = 0;
-        instance.getPhysicalDeviceQueueFamilyProperties(device, &queue_family_count, null);
-        log.info("found {} queue family", .{queue_family_count});
-        const families = arena.alloc(v.QueueFamilyProperties, queue_family_count) catch @panic("OOM");
-        instance.getPhysicalDeviceQueueFamilyProperties(device, &queue_family_count, families.ptr);
-        var graphics_family: ?u32 = null;
-        var present_family : ?u32 = null;
-        for (0..queue_family_count) |i| {
-            if (families[i].queue_flags.graphics)
-                graphics_family = @intCast(i);
-            if (try instance.getPhysicalDeviceSurfaceSupportKHR(device, @intCast(i), surface) == .true)
-                present_family = @intCast(i);
-        }
-        if (graphics_family == null) @panic("cannot found graphics family queue");
-        if (present_family == null)  @panic("cannot found present family queue");
-
-
-        const priority: []const f32 = &.{1};
-        const device_queue_create_infos: []const v.DeviceQueueCreateInfo = &.{
-            .{
-                .queue_family_index = graphics_family.?,
-                .queue_count = 1,
-                .p_queue_priorities = priority.ptr,
-            },
-            .{
-                .queue_family_index = present_family.?,
-                .queue_count = 1,
-                .p_queue_priorities = priority.ptr,
-            }
-        };
-        const device_feature = v.PhysicalDeviceFeatures {};
-        const extensions: []const [*:0]const u8 = &.{
-            v.extensions.khr_swapchain.name,
-        };
-        const device_create_info = v.DeviceCreateInfo {
-            .p_queue_create_infos = device_queue_create_infos.ptr,
-            .queue_create_info_count = @intCast(device_queue_create_infos.len),
-            .p_enabled_features = &device_feature,
-            .pp_enabled_extension_names = extensions.ptr,
-            .enabled_extension_count = extensions.len,
-        };
-
-        //
-        // Checks Swap Chain details
-        //
-        const details = try instance.getPhysicalDeviceSurfaceCapabilitiesKHR(device, surface);
-        var format_count: u32 = 0;
-        _ = try instance.getPhysicalDeviceSurfaceFormatsKHR(device, surface, &format_count, null);
-        if (format_count == 0) @panic("no format found");
-        log.info("found {} supported format", .{format_count});
-        const formats = arena.alloc(v.SurfaceFormatKHR, format_count) catch @panic("OOM");
-        _ = try instance.getPhysicalDeviceSurfaceFormatsKHR(device, surface, &format_count, formats.ptr);
-
-        var present_mode_count: u32 = 0;
-        _ = try instance.getPhysicalDeviceSurfacePresentModesKHR(device, surface, &present_mode_count, null);
-        if (present_mode_count == 0) @panic("no present mode found");
-        log.info("found {} present mode", .{present_mode_count});
-        const present_modes = arena.alloc(v.PresentModeKHR, present_mode_count) catch @panic("OOM");
-        _ = try instance.getPhysicalDeviceSurfacePresentModesKHR(device, surface, &present_mode_count, present_modes.ptr);
-
-        //
-        // Choose surface formats
-        //
-        const format = for (formats) |format| {
-            if (format.format == .r8g8b8a8_srgb and format.color_space == .srgb_nonlinear_khr) break format;
-        } else formats[0];
-        const present_mode = for (present_modes) |present_mode| {
-            if (present_mode == .mailbox_khr) break present_mode;
-        } else .fifo_khr;
-
-        const extent =
-            if (details.current_extent.width != std.math.maxInt(u32))
-                details.current_extent
-            else
-                v.Extent2D {
-                    .width = std.math.clamp(WINDOW_W, details.min_image_extent.width, details.max_image_extent.width),
-                    .height = std.math.clamp(WINDOW_H, details.min_image_extent.height, details.max_image_extent.height),
-                };
-         // simply sticking to this minimum means that
-         // we may sometimes have to wait on the driver to complete internal operations
-         // before we can acquire another image to render to. 
-         // Therefore it is recommended to request at least one more image than the minimum:
-
-        break :blk .{
-            try instance.createDevice(devices[0], &device_create_info, null),
-            graphics_family.?, present_family.?,
-            details,
-            format, present_mode,
-            extent,
-        };
-    };
-
-    const vkd = v.DeviceWrapper.load(device_handle, instance.wrapper.dispatch.vkGetDeviceProcAddr.?);
-    const device = Device.init(device_handle, &vkd);
+    const device = try vulkan.init_device(arena, WINDOW_W, WINDOW_H);
     defer device.destroyDevice(null);
+    const graphics_family = vulkan.state.graphics_family;
+    const format = vulkan.state.format;
+    const extent = vulkan.state.extent;
 
-    const graphics_queue = device.getDeviceQueue(graphics_family, 0);
-    const present_queue  = device.getDeviceQueue(present_family,  0);
+    const queues = vulkan.init_queues(device);
+    const graphics_queue = queues.graphics_queue;
+    const present_queue = queues.present_queue;
 
-    const swapchain = blk: {
-        const image_count = surface_details.min_image_count + 1;
-        assert(surface_details.max_image_count != 0 and image_count <= surface_details.max_image_count);
-
-        var create_info = v.SwapchainCreateInfoKHR {
-            .surface = surface,
-            .min_image_count = image_count,
-            .image_format = format.format,
-            .image_color_space = format.color_space,
-            .image_extent = extent,
-            .image_array_layers = 1,
-            .present_mode = present_mode,
-            .clipped = .true,
-            .image_usage = .{ .color_attachment = true },
-            .pre_transform = surface_details.current_transform,
-            .composite_alpha = .{ .opaque_khr = true },
-            .image_sharing_mode = .exclusive,
-            .queue_family_index_count = 0,
-            .p_queue_family_indices = null,
-            .old_swapchain = .null_handle,
-        };
-        if (graphics_family != present_family) {
-            create_info.image_sharing_mode = .concurrent;
-            create_info.queue_family_index_count = 2;
-            create_info.p_queue_family_indices = &.{graphics_family, present_family};
-        }
-
-        break :blk try device.createSwapchainKHR(&create_info, null);
-    };
+    const swapchain = try vulkan.init_swapchain(device);
     defer device.destroySwapchainKHR(swapchain, null);
 
-    const image_views = blk: {
-        var image_count: u32 = 0;
-        _ = try device.getSwapchainImagesKHR(swapchain, &image_count, null);
-        std.log.info("swapchain image: {}", .{image_count});
-        const images = arena.alloc(v.Image, image_count) catch @panic("OOM");
-        _ = try device.getSwapchainImagesKHR(swapchain, &image_count, images.ptr);
-
-        const image_views = arena.alloc(v.ImageView, image_count) catch @panic("OOM");
-        for (images, 0..) |image, i| {
-            const create_info = v.ImageViewCreateInfo {
-                .image = image,
-                .view_type = .@"2d",
-                .format = format.format,
-                .components = .{
-                    .r = .identity,
-                    .g = .identity,
-                    .b = .identity,
-                    .a = .identity,
-                },
-                .subresource_range = .{
-                    .aspect_mask = .{ .color = true },
-                    .base_mip_level = 0,
-                    .level_count = 1,
-                    .base_array_layer = 0,
-                    .layer_count = 1,
-                }
-            };
-            image_views[i] = try device.createImageView(&create_info, null);
-        }
-        break :blk image_views;
-    };
+    const image_views = try vulkan.init_image_views(arena, device);
     defer for (image_views) |image_view| device.destroyImageView(image_view, null);
 
     //
