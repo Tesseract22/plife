@@ -13,63 +13,16 @@ pub fn main(init: std.process.Init) !void {
         WINDOW_W, WINDOW_H, r.RGFW_windowCenter)
         orelse @panic("cannot create window");
 
-    const vkb = v.BaseWrapper.load(vkGetInstanceProcAddr);
     //
     // Create Instance
     //
-    const instance_handle = blk: {
-        // This is optional
-        var app_info = v.ApplicationInfo {
-            .application_version = @bitCast(v.API_VERSION_1_0),
-            .engine_version = @bitCast(v.API_VERSION_1_0),
-            .api_version = @bitCast(v.API_VERSION_1_0),
-        };
-        app_info.p_application_name = "Hello Triangle";
-        app_info.p_engine_name = "No Engine";
-
-        var create_info = v.InstanceCreateInfo {};
-        create_info.p_application_info = &app_info;
-        create_info.enabled_layer_count = 1;
-        const layers: []const [*:0]const u8 = &.{"VK_LAYER_KHRONOS_validation"};
-        create_info.pp_enabled_layer_names = layers.ptr;
-        create_info.enabled_layer_count = @intCast(layers.len);
-        // var required_extension_count: u32 = undefined;
-        // const required_extensions = r.RGFW_getRequiredInstanceExtensions_Vulkan(&required_extension_count);
-        // if (!required_extensions) {
-        //     fatal(
-        //         \\RGFW_getRequiredInstanceExtensions_Vulkan failed to find the
-        //         \\platform surface extensions.\n\nDo you have a compatible
-        //         \\Vulkan installable client driver (ICD) installed?\nPlease
-        //         \\look at the Getting Started guide for additional
-        //         \\information.\n",
-        //         \\vkCreateInstance Failure"
-        //         ,.{});
-        // }
-        // FIXME: #platform
-        const extensions: []const [*:0]const u8 = &.{
-            v.extensions.khr_surface.name,
-            v.extensions.khr_win_32_surface.name,
-        };
-        create_info.enabled_extension_count = extensions.len;
-        create_info.pp_enabled_extension_names = extensions.ptr;
-        break :blk try vkb.createInstance(&create_info, null);
-    };
-
-    const vki = v.InstanceWrapper.load(instance_handle, vkGetInstanceProcAddr);
-    const instance = Instance.init(instance_handle, &vki);
-    defer instance.destroyInstance(null);
+    const instance = vulkan.init_instance();
+    defer vulkan.cleanup();
 
     //
     // Create Surface
     //
-    const surface = blk: {
-        // FIXME: #platform
-        const create_info = v.Win32SurfaceCreateInfoKHR {
-            .hwnd = @ptrCast(r.RGFW_window_getHWND(window)),
-            .hinstance = @ptrCast(r.RGFW_window_getHINSTANCE()),
-        };
-        break :blk try instance.createWin32SurfaceKHR(&create_info, null);
-    };
+    const surface = try vulkan.init_surface(window);
     defer instance.destroySurfaceKHR(surface, null);
 
     //
@@ -558,6 +511,7 @@ pub fn main(init: std.process.Init) !void {
     r.RGFW_window_close(window);
     r.RGFW_deinit();
 }
+const vulkan = @import("vulkan.zig");
 const v = @import("vk.zig");
 const r = @import("RGFW");
 
