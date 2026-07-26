@@ -1,29 +1,52 @@
 const Vulkan = @This();
 vkb: v.BaseWrapper = undefined,
-instance_handle : v.Instance = .null_handle,
-instance_wrapper: v.InstanceWrapper = undefined,
-instance        : Instance = undefined,
-surface         : v.SurfaceKHR = .null_handle,
-physical_device : v.PhysicalDevice = .null_handle,
-graphics_family : u32 = undefined,
-present_family  : u32 = undefined,
-surface_details : v.SurfaceCapabilitiesKHR = undefined,
-format          : v.SurfaceFormatKHR = undefined,
-present_mode    : v.PresentModeKHR = undefined,
-extent          : v.Extent2D = undefined,
-device_handle   : v.Device = .null_handle,
-device_wrapper  : v.DeviceWrapper = undefined,
-device          : Device = undefined,
-graphics_queue  : v.Queue = .null_handle,
-present_queue   : v.Queue = .null_handle,
-swapchain       : v.SwapchainKHR = .null_handle,
-image_views     : []v.ImageView = &.{},
-vert            : v.ShaderModule = .null_handle,
-frag            : v.ShaderModule = .null_handle,
-render_pass     : v.RenderPass = .null_handle,
-frame_buffers   : []v.Framebuffer = &.{},
-command_pool    : v.CommandPool = .null_handle,
-command_buffers : [MAX_FRAMES_IN_FLIGHT]v.CommandBuffer = undefined,
+instance_handle   : v.Instance = .null_handle,
+instance_wrapper  : v.InstanceWrapper = undefined,
+instance          : Instance = undefined,
+
+surface           : v.SurfaceKHR = .null_handle,
+surface_details   : v.SurfaceCapabilitiesKHR = undefined,
+physical_device   : v.PhysicalDevice = .null_handle,
+
+graphics_family   : u32 = undefined,
+present_family    : u32 = undefined,
+
+
+format            : v.SurfaceFormatKHR = undefined,
+present_mode      : v.PresentModeKHR = undefined,
+
+extent            : v.Extent2D = undefined,
+viewport          : v.Viewport = undefined,
+scissor           : v.Rect2D = undefined,
+
+device_handle     : v.Device = .null_handle,
+device_wrapper    : v.DeviceWrapper = undefined,
+device            : Device = undefined,
+
+graphics_queue    : v.Queue = .null_handle,
+present_queue     : v.Queue = .null_handle,
+
+swapchain         : v.SwapchainKHR = .null_handle,
+
+vert              : v.ShaderModule = .null_handle,
+frag              : v.ShaderModule = .null_handle,
+render_pass       : v.RenderPass = .null_handle,
+frame_buffers     : []v.Framebuffer = &.{},
+image_views       : []v.ImageView = &.{},
+
+pipeline_layout   : v.PipelineLayout = .null_handle,
+graphics_pipeline : v.Pipeline = .null_handle,
+
+command_pool      : v.CommandPool = .null_handle,
+command_buffers   : [MAX_FRAMES_IN_FLIGHT]v.CommandBuffer = undefined,
+
+image_available_semas : [MAX_FRAMES_IN_FLIGHT]v.Semaphore = undefined,
+render_finished_semas : [MAX_FRAMES_IN_FLIGHT]v.Semaphore = undefined,
+in_flight_fences      : [MAX_FRAMES_IN_FLIGHT]v.Fence = undefined,
+
+per_frame: struct {
+    curr_frame: u32 = 0,
+} = .{},
 // pub fn init_window(w: u32, h: u32, name: []const u8) void {
 //
 // }
@@ -173,6 +196,17 @@ pub fn init_device(arena: std.mem.Allocator, window_width: u32, window_height: u
     state.device_handle = try state.instance.createDevice(state.physical_device, &device_create_info, null);
     state.device_wrapper = v.DeviceWrapper.load(state.device_handle, state.instance.wrapper.dispatch.vkGetDeviceProcAddr.?);
     state.device = Device.init(state.device_handle, &state.device_wrapper);
+
+    state.viewport = .{
+        .x = 0, .y = 0,
+        .width = @floatFromInt(state.extent.width),
+        .height = @floatFromInt(state.extent.height),
+        .min_depth = 0, .max_depth = 1,
+    };
+    state.scissor = .{
+        .offset = .{.x=0,.y=0},
+        .extent = state.extent,
+    };
     return state.device;
 }
 
@@ -254,7 +288,34 @@ pub fn init_image_views(arena: std.mem.Allocator, device: Device) ![]v.ImageView
 }
 
 pub fn cleanup() void {
-    state.instance.destroyInstance(null);
+    const device = state.device;
+    const instance = state.instance;
+
+    for (state.image_available_semas) |sema|
+        device.destroySemaphore(sema, null);
+    for (state.render_finished_semas) |sema|
+        device.destroySemaphore(sema, null);
+    for (state.in_flight_fences) |fence|
+        device.destroyFence(fence, null);
+
+    device.destroyCommandPool(state.command_pool, null);
+
+    device.destroyPipelineLayout(state.pipeline_layout, null);
+    device.destroyRenderPass(state.render_pass, null);
+    device.destroyPipeline(state.graphics_pipeline, null);
+
+    for (state.frame_buffers) |frame_buffer|
+        device.destroyFramebuffer(frame_buffer, null);
+
+    device.destroyShaderModule(state.vert, null);
+    device.destroyShaderModule(state.frag, null);
+    for (state.image_views) |image_view|
+        device.destroyImageView(image_view, null);
+    device.destroySwapchainKHR(state.swapchain, null);
+    device.destroyDevice(null);
+
+    instance.destroySurfaceKHR(state.surface, null);
+    instance.destroyInstance(null);
 }
 
 
@@ -351,6 +412,105 @@ pub fn init_frame_buffers(arena: std.mem.Allocator, device: Device) ![]v.Framebu
     return state.frame_buffers;
 }
 
+pub fn init_pipeline() !v.Pipeline {
+    const vert_create_info = v.PipelineShaderStageCreateInfo {
+        .stage = .{ .vertex = true },
+        .module = state.vert,
+        .p_name = "vert",
+    };
+    const frag_create_info = v.PipelineShaderStageCreateInfo {
+        .stage = .{ .fragment = true },
+        .module = state.frag,
+        .p_name = "frag",
+    };
+
+    const vertex_input_state_info = v.PipelineVertexInputStateCreateInfo {};
+    const assembly_state_info = v.PipelineInputAssemblyStateCreateInfo {
+        .topology = .triangle_list,
+        .primitive_restart_enable = .false,
+    };
+
+    const viewport_state_info = v.PipelineViewportStateCreateInfo {
+        .viewport_count = 1,
+        .p_viewports = &.{state.viewport},
+        .scissor_count = 1,
+        .p_scissors = &.{state.scissor},
+    };
+
+    const dynamic_states: []const v.DynamicState = &.{
+        .viewport,
+        .scissor,
+    };
+
+    const dynamic_state_info = v.PipelineDynamicStateCreateInfo {
+        .dynamic_state_count = @intCast(dynamic_states.len),
+        .p_dynamic_states = dynamic_states.ptr,
+    };
+
+    const rasteriazation_state_info = v.PipelineRasterizationStateCreateInfo {
+        .depth_clamp_enable = .false,
+        .rasterizer_discard_enable = .false,
+        .polygon_mode = .fill,
+        .line_width = 1,
+        .cull_mode = .{ .back = true },
+        .front_face = .clockwise,
+
+        .depth_bias_enable = .false,
+        .depth_bias_constant_factor = 0,
+        .depth_bias_clamp = 0,
+        .depth_bias_slope_factor = 0,
+    };
+
+    const multi_sample_state_info = v.PipelineMultisampleStateCreateInfo {
+        .rasterization_samples = .{ .@"1" = true },
+        .sample_shading_enable = .false,
+        .min_sample_shading = 1,
+        .p_sample_mask = null,
+        .alpha_to_coverage_enable = .false,
+        .alpha_to_one_enable = .false,
+    };
+
+    const color_blend_attachment_info = v.PipelineColorBlendAttachmentState {
+        .blend_enable = .true,
+        .src_color_blend_factor = .src_alpha,
+        .dst_color_blend_factor = .one_minus_src_alpha,
+        .color_blend_op = .@"add",
+        .src_alpha_blend_factor = .one,
+        .dst_alpha_blend_factor = .zero,
+        .alpha_blend_op = .@"add",
+        .color_write_mask = .{ .r = true, .g = true, .b = true, .a = true },
+    };
+
+    const color_blend_info = v.PipelineColorBlendStateCreateInfo {
+        .logic_op_enable = .false,
+        .logic_op = .copy,
+        .attachment_count = 1,
+        .p_attachments = &.{color_blend_attachment_info},
+        .blend_constants = .{0,0,0,0},
+    };
+
+    state.pipeline_layout = try state.device.createPipelineLayout(&.{}, null);
+
+    const graphics_pipeline_info = v.GraphicsPipelineCreateInfo {
+        .stage_count = 2,
+        .p_stages = &.{ vert_create_info, frag_create_info },
+        .p_vertex_input_state = &vertex_input_state_info,
+        .p_input_assembly_state = &assembly_state_info,
+        .p_viewport_state = &viewport_state_info,
+        .p_rasterization_state = &rasteriazation_state_info,
+        .p_multisample_state = &multi_sample_state_info,
+        .p_color_blend_state = &color_blend_info,
+        .p_dynamic_state = &dynamic_state_info,
+        .layout = state.pipeline_layout,
+        .render_pass = state.render_pass,
+        .subpass = 0,
+        .base_pipeline_index = -1,
+    };
+    _ = try state.device.createGraphicsPipelines(.null_handle, &.{graphics_pipeline_info}, null, @ptrCast(&state.graphics_pipeline));
+
+    return state.graphics_pipeline;
+}
+
 pub fn init_command_pool(device: Device) !v.CommandPool {
     state.command_pool = try device.createCommandPool(&.{
         .flags = .{ .reset_command_buffer = true },
@@ -368,4 +528,90 @@ pub fn init_command_buffers(device: Device) !CommandBuffers {
         .command_buffer_count = MAX_FRAMES_IN_FLIGHT,
     }, &state.command_buffers);
     return state.command_buffers;
+}
+
+pub fn init_sync_primitives(device: Device) !void {
+    for (0..MAX_FRAMES_IN_FLIGHT) |i| { state.image_available_semas[i] = try device.createSemaphore(&.{}, null);
+        state.render_finished_semas[i] =
+            try device.createSemaphore(&.{}, null);
+        state.in_flight_fences[i] =
+            try device.createFence(&.{ .flags = .{ .signaled = true } }, null); }
+}
+
+pub fn draw_frame() void {
+    const curr_frame = state.per_frame.curr_frame;
+    const image_idx = state.vulkan.acquire_image(curr_frame);
+
+    try record_command_buffers(curr_frame, image_idx);
+    try submit_command_buffer(curr_frame, image_idx);
+    curr_frame = (curr_frame + 1) % MAX_FRAMES_IN_FLIGHT;
+
+}
+
+pub fn acquire_image(curr_frame: u32) u32 {
+    const device = state.device;
+    _ = try device.waitForFences(&.{state.in_flight_fences[curr_frame]}, .true, std.math.maxInt(u64));
+    try device.resetFences(&.{state.in_flight_fences[curr_frame]});
+
+    const next_result = try device.acquireNextImageKHR(state.swapchain, std.math.maxInt(u64), state.image_available_semas[curr_frame], .null_handle);
+    return next_result.image_index;
+}
+
+pub fn record_command_buffers(curr_frame: u32, image_idx: u32) !void {
+    const command_buffers = state.command_buffers;
+    const device = state.device;
+    const command_buffer = command_buffers[curr_frame];
+
+    try device.resetCommandBuffer(command_buffer, .{});
+    try device.beginCommandBuffer(command_buffer, &.{});
+    device.cmdBeginRenderPass(command_buffer, &.{
+        .render_pass = state.render_pass,
+        .framebuffer = state.frame_buffers[image_idx],
+        .render_area = .{
+            .offset = .{.x=0,.y=0},
+            .extent = state.extent,
+        },
+        .clear_value_count = 1,
+        .p_clear_values = &.{
+            .{
+                .color = .{ .float_32 = .{0,0,0,1} },
+            }
+        },
+        }, .@"inline");
+
+    device.cmdBindPipeline(command_buffer, .graphics, state.graphics_pipeline);
+
+    device.cmdSetViewport(command_buffer, 0, &.{state.viewport});
+    device.cmdSetScissor(command_buffer, 0, &.{state.scissor});
+
+    device.cmdDraw(command_buffer, 3, 1, 0, 0);
+    device.cmdEndRenderPass(command_buffer);
+    try device.endCommandBuffer(command_buffer);
+}
+
+pub fn submit_command_buffer(curr_frame: u32, image_idx: u32) !void {
+    const device = state.device;
+    const wait_semas: []const v.Semaphore = &.{
+        state.image_available_semas[curr_frame],
+    };
+    const signal_semas: []const v.Semaphore = &.{
+        state.render_finished_semas[curr_frame],
+    };
+    const curr_command_buffers = state.command_buffers[curr_frame..curr_frame+1];
+    try device.queueSubmit(state.graphics_queue, &.{.{
+        .wait_semaphore_count = @intCast(wait_semas.len),
+        .p_wait_semaphores = wait_semas.ptr,
+        .p_wait_dst_stage_mask = &.{ .{ .color_attachment_output = true } },
+        .command_buffer_count = @intCast(curr_command_buffers.len),
+        .p_command_buffers = curr_command_buffers.ptr,
+        .signal_semaphore_count = @intCast(signal_semas.len),
+        .p_signal_semaphores = signal_semas.ptr,
+    }}, state.in_flight_fences[curr_frame]);
+
+    _ = try device.queuePresentKHR(state.present_queue, &.{
+        .wait_semaphore_count = @intCast(signal_semas.len),
+        .p_wait_semaphores = signal_semas.ptr,
+        .swapchain_count = 1, .p_swapchains = @ptrCast(&state.swapchain),
+        .p_image_indices = @ptrCast(&image_idx),
+    });
 }
