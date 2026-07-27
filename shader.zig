@@ -43,14 +43,16 @@ pub const Vertex = struct {
         const off_i = spirv.vertex_index % driver.VERT_PER_PARTICLE;
         const i = spirv.vertex_index / driver.VERT_PER_PARTICLE;
 
+        const particle = particles.ptr[i];
+
         const zoom = splat2(camera.zoom);
-        center.* = (particles.ptr[i].pos + V2 {camera.pos[0],camera.pos[1]}) * zoom;
+        center.* = (particle.pos + V2 {camera.pos[0],camera.pos[1]}) * zoom;
         const pos_offset = center.* + (positions[off_i] * splat2(PARTICLE_SIZE)) * splat2(camera.zoom);
         spirv.position_out.* = .{
             pos_offset[0], pos_offset[1], 0, 1
         };
         frag_pos.* = pos_offset;
-        frag_color.* = particles.ptr[i].color;
+        frag_color.* = constant.species[particle.specie].color;
     }
 };
 

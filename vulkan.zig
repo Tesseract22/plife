@@ -8,7 +8,7 @@ surface           : v.SurfaceKHR = .null_handle,
 surface_details   : v.SurfaceCapabilitiesKHR = undefined,
 physical_device   : v.PhysicalDevice = .null_handle,
 
-graphics_family   : u32 = undefined,
+graphics_compute_family   : u32 = undefined,
 present_family    : u32 = undefined,
 
 
@@ -26,6 +26,7 @@ mem_properties    : v.PhysicalDeviceMemoryProperties = undefined,
 
 graphics_queue    : v.Queue = .null_handle,
 present_queue     : v.Queue = .null_handle,
+compute_queue     : v.Queue = .null_handle,
 
 swapchain         : v.SwapchainKHR = .null_handle,
 
@@ -149,23 +150,23 @@ pub fn init_device(arena: std.mem.Allocator, window_width: u32, window_height: u
     log.info("found {} queue family", .{queue_family_count});
     const families = try arena.alloc(v.QueueFamilyProperties, queue_family_count);
     state.instance.getPhysicalDeviceQueueFamilyProperties(state.physical_device, &queue_family_count, families.ptr);
-    var graphics_family: ?u32 = null;
-    var present_family: ?u32 = null;
+    var graphics_family: ?u32 = null; // we need a queue for both graphics and compute
+    var present_family : ?u32 = null;
     for (0..queue_family_count) |i| {
-        if (families[i].queue_flags.graphics)
+        if (families[i].queue_flags.graphics and families[i].queue_flags.compute) 
             graphics_family = @intCast(i);
         if (try state.instance.getPhysicalDeviceSurfaceSupportKHR(state.physical_device, @intCast(i), state.surface) == .true)
             present_family = @intCast(i);
     }
     if (graphics_family == null) @panic("cannot found graphics family queue");
     if (present_family == null) @panic("cannot found present family queue");
-    state.graphics_family = graphics_family.?;
+    state.graphics_compute_family = graphics_family.?;
     state.present_family = present_family.?;
 
     const priority: []const f32 = &.{1};
     const device_queue_create_infos: []const v.DeviceQueueCreateInfo = &.{
         .{
-            .queue_family_index = state.graphics_family,
+            .queue_family_index = state.graphics_compute_family,
             .queue_count = 1,
             .p_queue_priorities = priority.ptr,
         },
@@ -251,13 +252,10 @@ pub const Queues = struct {
     present_queue: v.Queue,
 };
 
-pub fn init_queues(device: Device) Queues {
-    state.graphics_queue = device.getDeviceQueue(state.graphics_family, 0);
-    state.present_queue = device.getDeviceQueue(state.present_family, 0);
-    return .{
-        .graphics_queue = state.graphics_queue,
-        .present_queue = state.present_queue,
-    };
+pub fn init_queues(device: Device) void {
+    state.graphics_queue = device.getDeviceQueue(state.graphics_compute_family, 0);
+    state.present_queue  = device.getDeviceQueue(state.present_family, 0);
+    state.compute_queue  = device.getDeviceQueue(state.graphics_compute_family, 0);
 }
 
 pub fn init_swapchain(device: Device) !v.SwapchainKHR {
@@ -281,10 +279,10 @@ pub fn init_swapchain(device: Device) !v.SwapchainKHR {
         .p_queue_family_indices = null,
         .old_swapchain = .null_handle,
     };
-    if (state.graphics_family != state.present_family) {
+    if (state.graphics_compute_family != state.present_family) {
         create_info.image_sharing_mode = .concurrent;
         create_info.queue_family_index_count = 2;
-        create_info.p_queue_family_indices = &.{ state.graphics_family, state.present_family };
+        create_info.p_queue_family_indices = &.{ state.graphics_compute_family, state.present_family };
     }
 
     state.swapchain = try device.createSwapchainKHR(&create_info, null);
@@ -643,7 +641,7 @@ pub fn init_pipeline(
 pub fn init_command_pool(device: Device) !v.CommandPool {
     state.command_pool = try device.createCommandPool(&.{
         .flags = .{ .reset_command_buffer = true },
-        .queue_family_index = state.graphics_family,
+        .queue_family_index = state.graphics_compute_family,
     }, null);
     return state.command_pool;
 }
