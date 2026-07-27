@@ -22,6 +22,7 @@ scissor           : v.Rect2D = undefined,
 device_handle     : v.Device = .null_handle,
 device_wrapper    : v.DeviceWrapper = undefined,
 device            : Device = undefined,
+mem_properties    : v.PhysicalDeviceMemoryProperties = undefined,
 
 graphics_queue    : v.Queue = .null_handle,
 present_queue     : v.Queue = .null_handle,
@@ -35,6 +36,8 @@ frame_buffers     : []v.Framebuffer = &.{},
 image_views       : []v.ImageView = &.{},
 
 pipeline_layout   : v.PipelineLayout = .null_handle,
+descriptor_pool   : v.DescriptorPool = .null_handle,
+descriptor_set    : v.DescriptorSet = .null_handle,
 graphics_pipeline : v.Pipeline = .null_handle,
 
 command_pool      : v.CommandPool = .null_handle,
@@ -46,6 +49,8 @@ in_flight_fences      : [MAX_FRAMES_IN_FLIGHT]v.Fence = undefined,
 
 per_frame: struct {
     curr_frame: u32 = 0,
+    push_constant: *const anyopaque = undefined,
+    push_constant_size: u32 = 0,
 } = .{},
 // pub fn init_window(w: u32, h: u32, name: []const u8) void {
 //
@@ -60,9 +65,9 @@ const vkGetInstanceProcAddr = @extern(v.PfnGetInstanceProcAddr, .{
 pub fn init_instance() !Instance {
     state.vkb = v.BaseWrapper.load(vkGetInstanceProcAddr);
     var app_info = v.ApplicationInfo {
-        .application_version = @bitCast(v.API_VERSION_1_0),
-        .engine_version = @bitCast(v.API_VERSION_1_0),
-        .api_version = @bitCast(v.API_VERSION_1_0),
+        .application_version = @bitCast(v.API_VERSION_1_2),
+        .engine_version = @bitCast(v.API_VERSION_1_2),
+        .api_version = @bitCast(v.API_VERSION_1_2),
     };
     app_info.p_application_name = "Hello Triangle";
     app_info.p_engine_name = "No Engine";
@@ -111,6 +116,24 @@ pub fn init_surface(window: *r.RGFW_window) !v.SurfaceKHR {
     return state.surface;
 }
 
+pub fn is_device_good(device: v.PhysicalDevice) bool {
+    const instance = state.instance;
+    // const properties = instance.getPhysicalDeviceProperties(device);
+    // const features   = instance.getPhysicalDeviceFeatures(device);
+
+    var vulkan11_features = v.PhysicalDeviceVulkan11Features{
+        .s_type = .physical_device_vulkan_1_1_features,
+    };
+    var features2 = v.PhysicalDeviceFeatures2 {
+        .s_type = .physical_device_features_2,
+        .p_next = &vulkan11_features,
+        .features = .{},
+    };
+    instance.getPhysicalDeviceFeatures2(device, &features2);
+
+    return vulkan11_features.variable_pointers == .true;
+}
+
 pub fn init_device(arena: std.mem.Allocator, window_width: u32, window_height: u32) !Device {
     var device_count: u32 = 0;
     _ = try state.instance.enumeratePhysicalDevices(&device_count, null);
@@ -119,6 +142,7 @@ pub fn init_device(arena: std.mem.Allocator, window_width: u32, window_height: u
     const devices = try arena.alloc(v.PhysicalDevice, device_count);
     _ = try state.instance.enumeratePhysicalDevices(&device_count, devices.ptr);
     state.physical_device = devices[0];
+    assert(is_device_good(state.physical_device));
 
     var queue_family_count: u32 = 0;
     state.instance.getPhysicalDeviceQueueFamilyProperties(state.physical_device, &queue_family_count, null);
@@ -154,8 +178,16 @@ pub fn init_device(arena: std.mem.Allocator, window_width: u32, window_height: u
     const device_feature = v.PhysicalDeviceFeatures {};
     const extensions: []const [*:0]const u8 = &.{
         v.extensions.khr_swapchain.name,
+        v.extensions.khr_storage_buffer_storage_class.name,
+        v.extensions.khr_variable_pointers.name,
     };
+    var enabled_vulkan11_features = v.PhysicalDeviceVulkan11Features{
+        .variable_pointers = .true,
+        .variable_pointers_storage_buffer = .true, // enable both to be safe
+    };
+
     const device_create_info = v.DeviceCreateInfo {
+        .p_next = &enabled_vulkan11_features,
         .p_queue_create_infos = device_queue_create_infos.ptr,
         .queue_create_info_count = @intCast(device_queue_create_infos.len),
         .p_enabled_features = &device_feature,
@@ -195,6 +227,7 @@ pub fn init_device(arena: std.mem.Allocator, window_width: u32, window_height: u
 
     state.device_handle = try state.instance.createDevice(state.physical_device, &device_create_info, null);
     state.device_wrapper = v.DeviceWrapper.load(state.device_handle, state.instance.wrapper.dispatch.vkGetDeviceProcAddr.?);
+    assert(state.device_wrapper.dispatch.vkCreateGraphicsPipelines != null);
     state.device = Device.init(state.device_handle, &state.device_wrapper);
 
     state.viewport = .{
@@ -207,6 +240,9 @@ pub fn init_device(arena: std.mem.Allocator, window_width: u32, window_height: u
         .offset = .{.x=0,.y=0},
         .extent = state.extent,
     };
+
+    state.mem_properties =
+        state.instance.getPhysicalDeviceMemoryProperties(state.physical_device);
     return state.device;
 }
 
@@ -298,6 +334,7 @@ pub fn cleanup() void {
     for (state.in_flight_fences) |fence|
         device.destroyFence(fence, null);
 
+    device.destroyDescriptorPool(state.descriptor_pool, null);
     device.destroyCommandPool(state.command_pool, null);
 
     device.destroyPipelineLayout(state.pipeline_layout, null);
@@ -412,7 +449,12 @@ pub fn init_frame_buffers(arena: std.mem.Allocator, device: Device) ![]v.Framebu
     return state.frame_buffers;
 }
 
-pub fn init_pipeline() !v.Pipeline {
+pub fn init_pipeline(
+    vert_input_stride: usize,
+    vert_input_attrs: []const v.VertexInputAttributeDescription,
+    ssbo: v.Buffer, push_constant_size: usize) !v.Pipeline {
+    const device = state.device;
+
     const vert_create_info = v.PipelineShaderStageCreateInfo {
         .stage = .{ .vertex = true },
         .module = state.vert,
@@ -424,7 +466,22 @@ pub fn init_pipeline() !v.Pipeline {
         .p_name = "frag",
     };
 
-    const vertex_input_state_info = v.PipelineVertexInputStateCreateInfo {};
+    //
+    // Vertex Input
+    //
+    const vertex_binding_desc = v.VertexInputBindingDescription {
+        .binding    = 0,
+        .stride     = @intCast(vert_input_stride),
+        .input_rate = .vertex,
+    };
+
+    const vertex_input_state_info = v.PipelineVertexInputStateCreateInfo {
+        .vertex_binding_description_count = 1,
+        .p_vertex_binding_descriptions = &.{vertex_binding_desc},
+        .vertex_attribute_description_count = @intCast(vert_input_attrs.len),
+        .p_vertex_attribute_descriptions = vert_input_attrs.ptr,
+
+    };
     const assembly_state_info = v.PipelineInputAssemblyStateCreateInfo {
         .topology = .triangle_list,
         .primitive_restart_enable = .false,
@@ -489,7 +546,79 @@ pub fn init_pipeline() !v.Pipeline {
         .blend_constants = .{0,0,0,0},
     };
 
-    state.pipeline_layout = try state.device.createPipelineLayout(&.{}, null);
+    const bindings = [_]v.DescriptorSetLayoutBinding{
+        .{
+            .binding = 0,
+            .descriptor_type = .storage_buffer,
+            .descriptor_count = 1,
+            .stage_flags = .{ .vertex = true },
+        },
+        // .{
+        //     .binding = 1,
+        //     .descriptor_type = .storage_buffer,
+        //     .descriptor_count = 1,
+        //     .stage_flags = .{ .vertex = true },
+        // },
+    };
+    const descriptor_set_layout = try state.device.createDescriptorSetLayout(&.{
+        .binding_count = @intCast(bindings.len),
+        .p_bindings = &bindings,
+    }, null);
+
+    const push_constant_ranges = [_]v.PushConstantRange{.{
+        .stage_flags = .{ .vertex = true, .fragment = true },
+        .offset = 0,
+        .size = @intCast(push_constant_size),
+    }};
+    state.pipeline_layout = try state.device.createPipelineLayout(&.{
+        .set_layout_count = 1,
+        .p_set_layouts = &.{descriptor_set_layout},
+        .push_constant_range_count = 1,
+        .p_push_constant_ranges = &push_constant_ranges,
+    }, null);
+    defer device.destroyDescriptorSetLayout(descriptor_set_layout, null);
+
+    {
+        state.descriptor_pool = try device.createDescriptorPool(&.{
+            .max_sets = 1,
+            .pool_size_count = 1,
+            .p_pool_sizes = &.{.{
+                .type = .storage_buffer,
+                .descriptor_count = 2,
+            }},
+        }, null);
+        // defer device.destroyDescriptorPool(state.descriptor_pool, null);
+
+        // Allocate
+        try device.allocateDescriptorSets(&.{
+            .descriptor_pool = state.descriptor_pool,
+            .descriptor_set_count = 1,
+            .p_set_layouts = @ptrCast(&descriptor_set_layout),
+        }, @ptrCast(&state.descriptor_set));
+
+        // Write buffer references into the set
+        const ssbo_info = v.DescriptorBufferInfo{
+            .buffer = ssbo,
+            .offset = 0,
+            .range = v.WHOLE_SIZE,
+        };
+
+        const writes = [_]v.WriteDescriptorSet{
+            .{
+                .dst_set = state.descriptor_set,
+                .dst_binding = 0,
+                .dst_array_element = 0,
+                .descriptor_count = 1,
+                .descriptor_type = .storage_buffer,
+                .p_buffer_info = @ptrCast(&ssbo_info),
+
+                .p_image_info = &.{},
+                .p_texel_buffer_view = &.{},
+            },
+        };
+
+        device.updateDescriptorSets(&writes, null);
+    }
 
     const graphics_pipeline_info = v.GraphicsPipelineCreateInfo {
         .stage_count = 2,
@@ -530,6 +659,94 @@ pub fn init_command_buffers(device: Device) !CommandBuffers {
     return state.command_buffers;
 }
 
+pub fn find_mem_type(filter: u32, properties: v.MemoryPropertyFlags) u32 {
+    for (0..state.mem_properties.memory_type_count) |i| {
+        if (filter & (@as(usize, 1) << @intCast(i)) != 0 and
+            state.mem_properties.memory_types[i].property_flags.intersect(properties).contains(properties)) {
+            return @intCast(i);
+        }
+    } else @panic("no suitable memory type found");
+}
+
+pub const Buffer = struct {
+    buf: v.Buffer,
+    mem: v.DeviceMemory,
+
+    pub fn destroy(self: Buffer) void {
+        state.device.destroyBuffer(self.buf, null);
+        state.device.freeMemory(self.mem, null);
+    }
+};
+
+pub fn create_buffer(size: usize, usage: v.BufferUsageFlags, properties: v.MemoryPropertyFlags) !Buffer {
+    const device = state.device;
+    const buf = try device.createBuffer(&.{
+        .size = @intCast(size),
+        .usage = usage,
+        .sharing_mode = .exclusive,
+    }, null); 
+
+    // Allocate Device Memory
+    const requiremenst = device.getBufferMemoryRequirements(buf);
+    const mem_type = find_mem_type(requiremenst.memory_type_bits, properties);
+    const device_mem = try device.allocateMemory(&.{
+        .allocation_size = requiremenst.size,
+        .memory_type_index = mem_type,
+    }, null);
+
+    try device.bindBufferMemory(buf, device_mem, 0);
+    return .{
+        .buf = buf,
+        .mem = device_mem,
+    };
+}
+
+pub fn create_staging_buffer(size: usize) !Buffer {
+    return create_buffer(size, .{ .transfer_src = true }, .{ .host_visible = true, .host_coherent = true });
+}
+
+pub fn create_storage_buffer(size: usize) !Buffer {
+    return create_buffer(size, .{ .transfer_dst = true, .vertex_buffer = true, .storage_buffer = true }, .{ .device_local = true });
+}
+
+pub fn create_vertex_buffer(size: usize) !Buffer {
+    return create_buffer(size, .{ .transfer_dst = true, .vertex_buffer = true }, .{ .device_local = true });
+}
+
+pub fn copy_buffer(dst: Buffer, src: Buffer, size: usize) !void {
+    const device = state.device;
+
+    var cmd: v.CommandBuffer = .null_handle;
+    try device.allocateCommandBuffers(&.{
+       .level = .primary,
+       .command_pool = state.command_pool,
+       .command_buffer_count = 1,
+    }, @ptrCast(&cmd));
+    defer device.freeCommandBuffers(state.command_pool, &.{cmd});
+
+    {
+        try device.beginCommandBuffer(cmd, &.{
+            .flags = .{ .one_time_submit = true },
+        });
+        device.cmdCopyBuffer(cmd, src.buf, dst.buf, &.{
+            .{ .src_offset = 0, .dst_offset = 0, .size = size },
+        });
+        try device.endCommandBuffer(cmd);
+    }
+
+    try device.queueSubmit(state.graphics_queue, &.{
+        .{ .command_buffer_count = 1, .p_command_buffers = &.{cmd} }
+    }, .null_handle);
+    try device.queueWaitIdle(state.graphics_queue);
+}
+
+pub fn map_mem(mem: v.DeviceMemory, comptime T: type, len: usize) ![]T {
+    const device = state.device;
+    const size = @sizeOf(T) * len;
+    const ptr: [*]T = @alignCast(@ptrCast(try device.mapMemory(mem, 0, size, .{})));
+    return ptr[0..len];
+} 
+
 pub fn init_sync_primitives(device: Device) !void {
     for (0..MAX_FRAMES_IN_FLIGHT) |i| { state.image_available_semas[i] = try device.createSemaphore(&.{}, null);
         state.render_finished_semas[i] =
@@ -538,17 +755,17 @@ pub fn init_sync_primitives(device: Device) !void {
             try device.createFence(&.{ .flags = .{ .signaled = true } }, null); }
 }
 
-pub fn draw_frame() void {
-    const curr_frame = state.per_frame.curr_frame;
-    const image_idx = state.vulkan.acquire_image(curr_frame);
+pub fn draw_frame(vertex_count: u32, vertex_buf: v.Buffer) !void {
+    const curr_frame = &state.per_frame.curr_frame;
+    const image_idx = try acquire_image(curr_frame.*);
 
-    try record_command_buffers(curr_frame, image_idx);
-    try submit_command_buffer(curr_frame, image_idx);
-    curr_frame = (curr_frame + 1) % MAX_FRAMES_IN_FLIGHT;
+    try record_command_buffers(curr_frame.*, image_idx, vertex_count, vertex_buf);
+    try submit_command_buffer(curr_frame.*, image_idx);
+    curr_frame.* = (curr_frame.* + 1) % MAX_FRAMES_IN_FLIGHT;
 
 }
 
-pub fn acquire_image(curr_frame: u32) u32 {
+pub fn acquire_image(curr_frame: u32) !u32 {
     const device = state.device;
     _ = try device.waitForFences(&.{state.in_flight_fences[curr_frame]}, .true, std.math.maxInt(u64));
     try device.resetFences(&.{state.in_flight_fences[curr_frame]});
@@ -557,7 +774,9 @@ pub fn acquire_image(curr_frame: u32) u32 {
     return next_result.image_index;
 }
 
-pub fn record_command_buffers(curr_frame: u32, image_idx: u32) !void {
+pub fn record_command_buffers(
+    curr_frame: u32, image_idx: u32,
+    vertex_count: u32, vertex_buf: v.Buffer) !void {
     const command_buffers = state.command_buffers;
     const device = state.device;
     const command_buffer = command_buffers[curr_frame];
@@ -584,7 +803,14 @@ pub fn record_command_buffers(curr_frame: u32, image_idx: u32) !void {
     device.cmdSetViewport(command_buffer, 0, &.{state.viewport});
     device.cmdSetScissor(command_buffer, 0, &.{state.scissor});
 
-    device.cmdDraw(command_buffer, 3, 1, 0, 0);
+    if (state.per_frame.push_constant_size > 0)
+    device.cmdPushConstants(command_buffer, state.pipeline_layout, .{ .vertex = true, .fragment = true }, 0,
+        state.per_frame.push_constant_size, state.per_frame.push_constant);
+
+    device.cmdBindDescriptorSets(command_buffer,
+        .graphics, state.pipeline_layout, 0, &.{ state.descriptor_set }, null);
+    device.cmdBindVertexBuffers(command_buffer, 0, &.{vertex_buf}, &.{0});
+    device.cmdDraw(command_buffer, vertex_count, 1, 0, 0);
     device.cmdEndRenderPass(command_buffer);
     try device.endCommandBuffer(command_buffer);
 }
@@ -614,4 +840,9 @@ pub fn submit_command_buffer(curr_frame: u32, image_idx: u32) !void {
         .swapchain_count = 1, .p_swapchains = @ptrCast(&state.swapchain),
         .p_image_indices = @ptrCast(&image_idx),
     });
+}
+
+pub fn set_push_constant(comptime T: type, data: *const T) void {
+    state.per_frame.push_constant = data;
+    state.per_frame.push_constant_size = @sizeOf(T);
 }
