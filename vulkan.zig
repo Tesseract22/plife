@@ -1,4 +1,6 @@
 const Vulkan = @This();
+pub const MAX_FRAMES_IN_FLIGHT = 2;
+pub const COMPUTE_STAGE_COUNT  = 2;
 vkb: v.BaseWrapper = undefined,
 instance_handle   : v.Instance = .null_handle,
 instance_wrapper  : v.InstanceWrapper = undefined,
@@ -41,17 +43,18 @@ pipeline_layout   : v.PipelineLayout = .null_handle,
 descriptor_pool   : v.DescriptorPool = .null_handle,
 descriptor_set    : [MAX_FRAMES_IN_FLIGHT]v.DescriptorSet = .{.null_handle, .null_handle},
 graphics_pipeline : v.Pipeline = .null_handle,
-compute_pipeline  : v.Pipeline = .null_handle,
+compute_pipelines  : [COMPUTE_STAGE_COUNT]v.Pipeline = .{.null_handle, .null_handle},
 
 command_pool               : v.CommandPool = .null_handle,
 graphics_command_buffers   : [MAX_FRAMES_IN_FLIGHT]v.CommandBuffer = undefined,
-compute_command_buffers    : [MAX_FRAMES_IN_FLIGHT]v.CommandBuffer = undefined,
+compute_command_buffers    : [COMPUTE_STAGE_COUNT]v.CommandBuffer = undefined,
 
 image_available_semas         : [MAX_FRAMES_IN_FLIGHT]v.Semaphore = undefined,
 render_finished_semas         : [MAX_FRAMES_IN_FLIGHT]v.Semaphore = undefined,
 in_flight_fences              : [MAX_FRAMES_IN_FLIGHT]v.Fence = undefined,
-compute_finished_semas        : [MAX_FRAMES_IN_FLIGHT]v.Semaphore = undefined,
-compute_in_flight_fences      : [MAX_FRAMES_IN_FLIGHT]v.Fence = undefined,
+
+compute_finished_semas        : [COMPUTE_STAGE_COUNT]v.Semaphore = undefined,
+compute_in_flight_fence       : v.Fence = undefined,
 
 frame_counter: u32 = 0,
 
@@ -63,7 +66,6 @@ per_frame: struct {
 // pub fn init_window(w: u32, h: u32, name: []const u8) void {
 //
 // }
-pub const MAX_FRAMES_IN_FLIGHT = 2;
 pub var state = Vulkan {};
 const vkGetInstanceProcAddr = @extern(v.PfnGetInstanceProcAddr, .{
     .name = "vkGetInstanceProcAddr",
@@ -341,8 +343,7 @@ pub fn cleanup() void {
         device.destroyFence(fence, null);
     for (state.compute_finished_semas) |sema|
         device.destroySemaphore(sema, null);
-    for (state.compute_in_flight_fences) |fence|
-        device.destroyFence(fence, null);
+    device.destroyFence(state.compute_in_flight_fence, null);
 
     device.destroyDescriptorPool(state.descriptor_pool, null);
     device.destroyCommandPool(state.command_pool, null);
@@ -351,7 +352,8 @@ pub fn cleanup() void {
     device.destroyPipelineLayout(state.pipeline_layout, null);
     device.destroyRenderPass(state.render_pass, null);
     device.destroyPipeline(state.graphics_pipeline, null);
-    device.destroyPipeline(state.compute_pipeline, null);
+    for (state.compute_pipelines) |pipeline|
+        device.destroyPipeline(pipeline, null);
 
     for (state.frame_buffers) |frame_buffer|
         device.destroyFramebuffer(frame_buffer, null);
@@ -452,12 +454,106 @@ pub fn init_frame_buffers(arena: std.mem.Allocator, device: Device) !void {
     }
 }
 
+// Descriptor Set describes how storage buffer etc. is accessed in shaders
+pub fn init_descriptor_set(ping_pong: [MAX_FRAMES_IN_FLIGHT]v.Buffer, grid_offsets: v.Buffer) !void {
+    const device = state.device;
+    const bindings = [_]v.DescriptorSetLayoutBinding{
+        .{ // particles ping buffer
+            .binding = 0,
+            .descriptor_type = .storage_buffer,
+            .descriptor_count = 1,
+            .stage_flags = .{ .vertex = true, .compute = true },
+        },
+        .{ // particles pong buffer
+            .binding = 1,
+            .descriptor_type = .storage_buffer,
+            .descriptor_count = 1,
+            .stage_flags = .{ .vertex = true, .compute = true },
+        },
+        .{ // grid offsets buffer
+            .binding = 2,
+            .descriptor_type = .storage_buffer,
+            .descriptor_count = 1,
+            .stage_flags = .{ .compute = true },
+        }
+    };
+
+    state.descriptor_set_layout = try state.device.createDescriptorSetLayout(&.{
+        .binding_count = @intCast(bindings.len),
+        .p_bindings = &bindings,
+    }, null);
+
+    {
+        state.descriptor_pool = try device.createDescriptorPool(&.{
+            .max_sets = MAX_FRAMES_IN_FLIGHT,
+            .pool_size_count = bindings.len,
+            .p_pool_sizes = &.{
+                .{
+                    .type = .storage_buffer,
+                    .descriptor_count = 2,
+                },
+                .{
+                    .type = .storage_buffer,
+                    .descriptor_count = 2,
+                },
+                .{
+                    .type = .storage_buffer,
+                    .descriptor_count = 2,
+                }
+            },
+        }, null);
+        // defer device.destroyDescriptorPool(state.descriptor_pool, null);
+
+        // Allocate
+        try device.allocateDescriptorSets(&.{
+            .descriptor_pool = state.descriptor_pool,
+            .descriptor_set_count = state.descriptor_set.len,
+            .p_set_layouts = &.{state.descriptor_set_layout, state.descriptor_set_layout}, // same layout for both set
+        }, &state.descriptor_set);
+
+        for (0..MAX_FRAMES_IN_FLIGHT) |i| {
+            // Write buffer references into the set
+            const ssbo_info = [_]v.DescriptorBufferInfo {.
+                {
+                    .buffer = ping_pong[i],
+                    .offset = 0,
+                    .range = v.WHOLE_SIZE,
+                },
+                .{
+                    .buffer = ping_pong[(i+1)%MAX_FRAMES_IN_FLIGHT],
+                    .offset = 0,
+                    .range = v.WHOLE_SIZE,
+                },
+                .{
+                    .buffer = grid_offsets,
+                    .offset = 0,
+                    .range = v.WHOLE_SIZE,
+                }
+            };
+
+            const writes = [_]v.WriteDescriptorSet{
+                .{
+                    .dst_set = state.descriptor_set[i],
+                    .dst_binding = 0,
+                    .dst_array_element = 0,
+                    .descriptor_count = 2,
+                    .descriptor_type = .storage_buffer,
+                    .p_buffer_info = &ssbo_info,
+
+                    .p_image_info = &.{},
+                    .p_texel_buffer_view = &.{},
+                },
+            };
+
+            device.updateDescriptorSets(&writes, null);
+        }
+    }
+}
+
 pub fn init_pipeline(
     vert_input_stride: usize,
     vert_input_attrs: []const v.VertexInputAttributeDescription,
-    ssbo: [MAX_FRAMES_IN_FLIGHT]v.Buffer,
     push_constant_size: usize) !v.Pipeline {
-    const device = state.device;
 
     const vert_create_info = v.PipelineShaderStageCreateInfo {
         .stage = .{ .vertex = true },
@@ -556,25 +652,6 @@ pub fn init_pipeline(
         .size = @intCast(push_constant_size),
     }};
 
-    const bindings = [_]v.DescriptorSetLayoutBinding{
-        .{
-            .binding = 0,
-            .descriptor_type = .storage_buffer,
-            .descriptor_count = 1,
-            .stage_flags = .{ .vertex = true, .compute = true },
-        },
-        .{
-            .binding = 1,
-            .descriptor_type = .storage_buffer,
-            .descriptor_count = 1,
-            .stage_flags = .{ .vertex = true, .compute = true },
-        },
-    };
-
-    state.descriptor_set_layout = try state.device.createDescriptorSetLayout(&.{
-        .binding_count = @intCast(bindings.len),
-        .p_bindings = &bindings,
-    }, null);
     state.pipeline_layout = try state.device.createPipelineLayout(&.{
         .set_layout_count = 1,
         .p_set_layouts = &.{state.descriptor_set_layout},
@@ -582,62 +659,7 @@ pub fn init_pipeline(
         .p_push_constant_ranges = &push_constant_ranges,
     }, null);
 
-    {
-        state.descriptor_pool = try device.createDescriptorPool(&.{
-            .max_sets = MAX_FRAMES_IN_FLIGHT,
-            .pool_size_count = MAX_FRAMES_IN_FLIGHT,
-            .p_pool_sizes = &.{
-                .{
-                    .type = .storage_buffer,
-                    .descriptor_count = 2,
-                },
-                .{
-                    .type = .storage_buffer,
-                    .descriptor_count = 2,
-                }
-            },
-        }, null);
-        // defer device.destroyDescriptorPool(state.descriptor_pool, null);
 
-        // Allocate
-        try device.allocateDescriptorSets(&.{
-            .descriptor_pool = state.descriptor_pool,
-            .descriptor_set_count = state.descriptor_set.len,
-            .p_set_layouts = &.{state.descriptor_set_layout, state.descriptor_set_layout}, // same layout for both set
-        }, &state.descriptor_set);
-
-        for (0..MAX_FRAMES_IN_FLIGHT) |i| {
-            // Write buffer references into the set
-            const ssbo_info = [_]v.DescriptorBufferInfo {.
-                {
-                    .buffer = ssbo[i],
-                    .offset = 0,
-                    .range = v.WHOLE_SIZE,
-                },
-                .{
-                    .buffer = ssbo[(i+1)%MAX_FRAMES_IN_FLIGHT],
-                    .offset = 0,
-                    .range = v.WHOLE_SIZE,
-                }
-            };
-
-            const writes = [_]v.WriteDescriptorSet{
-                .{
-                    .dst_set = state.descriptor_set[i],
-                    .dst_binding = 0,
-                    .dst_array_element = 0,
-                    .descriptor_count = 2,
-                    .descriptor_type = .storage_buffer,
-                    .p_buffer_info = &ssbo_info,
-
-                    .p_image_info = &.{},
-                    .p_texel_buffer_view = &.{},
-                },
-            };
-
-            device.updateDescriptorSets(&writes, null);
-        }
-    }
 
     const graphics_pipeline_info = v.GraphicsPipelineCreateInfo {
         .stage_count = 2,
@@ -662,16 +684,31 @@ pub fn init_pipeline(
 pub fn init_compute_pipeline() !void {
     const device = state.device;
 
-    const compute_shader_info = v.PipelineShaderStageCreateInfo {
-        .stage = .{ .compute = true },
-        .module = state.shader,
-        .p_name = "compute",
+    const compute_shader_infos = [COMPUTE_STAGE_COUNT]v.PipelineShaderStageCreateInfo {
+        .{
+            .stage = .{ .compute = true },
+            .module = state.shader,
+            .p_name = "compute_grid_offsets",
+        },
+        .{
+            .stage = .{ .compute = true },
+            .module = state.shader,
+            .p_name = "compute",
+        }
     };
-    _ = try device.createComputePipelines(.null_handle, &.{.{
-        .layout = state.pipeline_layout,
-        .stage  = compute_shader_info,
-        .base_pipeline_index = -1,
-    }}, null, @ptrCast(&state.compute_pipeline));
+    const create_infos = [COMPUTE_STAGE_COUNT]v.ComputePipelineCreateInfo {
+        .{
+            .layout = state.pipeline_layout,
+            .stage  = compute_shader_infos[0],
+            .base_pipeline_index = -1,
+        },
+        .{
+            .layout = state.pipeline_layout,
+            .stage  = compute_shader_infos[1],
+            .base_pipeline_index = -1,
+        }
+    };
+    _ = try device.createComputePipelines(.null_handle, &create_infos, null, &state.compute_pipelines);
 }
 
 pub fn init_command_pool(device: Device) !v.CommandPool {
@@ -743,8 +780,8 @@ pub fn create_staging_buffer(size: usize) !Buffer {
     return create_buffer(size, .{ .transfer_src = true }, .{ .host_visible = true, .host_coherent = true });
 }
 
-pub fn create_storage_buffer(size: usize) !Buffer {
-    return create_buffer(size, .{ .transfer_dst = true, .vertex_buffer = true, .storage_buffer = true }, .{ .device_local = true });
+pub fn create_storage_buffer(size: usize, vertex: bool) !Buffer {
+    return create_buffer(size, .{ .transfer_dst = true, .vertex_buffer = vertex, .storage_buffer = true }, .{ .device_local = true });
 }
 
 pub fn create_vertex_buffer(size: usize) !Buffer {
@@ -792,13 +829,14 @@ pub fn init_sync_primitives(device: Device) !void {
             try device.createSemaphore(&.{}, null);
         state.in_flight_fences[i] =
             try device.createFence(&.{ .flags = .{ .signaled = true } }, null);
-
+    }
+    for (0..COMPUTE_STAGE_COUNT) |i| {
         state.compute_finished_semas[i] =
             try device.createSemaphore(&.{}, null);
-        state.compute_in_flight_fences[i] =
+    }
+    state.compute_in_flight_fence =
             try device.createFence(&.{ .flags = .{ .signaled = true } }, null);
 
-    }
 }
 
 pub fn draw_frame(vertex_count: u32, vertex_buf: v.Buffer) !void {
@@ -808,7 +846,7 @@ pub fn draw_frame(vertex_count: u32, vertex_buf: v.Buffer) !void {
     try record_command_buffers(curr_frame.*, image_idx, vertex_count, vertex_buf);
     try submit_command_buffer(curr_frame.*, image_idx);
     curr_frame.* = (curr_frame.* + 1) % MAX_FRAMES_IN_FLIGHT;
-    // state.frame_counter += 1;
+    state.frame_counter += 1;
 }
 
 pub fn acquire_image(curr_frame: u32) !u32 {
@@ -863,7 +901,7 @@ pub fn record_command_buffers(
 pub fn submit_command_buffer(curr_frame: u32, image_idx: u32) !void {
     const device = state.device;
     const wait_semas: []const v.Semaphore = &.{
-        state.compute_finished_semas[curr_frame],
+        state.compute_finished_semas[COMPUTE_STAGE_COUNT-1], // waits on the last computaion
         state.image_available_semas[curr_frame]
     };
     const signal_semas: []const v.Semaphore = &.{
@@ -893,13 +931,17 @@ pub fn set_push_constant(comptime T: type, data: *const T) void {
     state.per_frame.push_constant_size = @sizeOf(T);
 }
 
-pub fn record_dispatch_command(curr_frame: u32, x: u32) !void {
+// The curr_frame is used for determine ping-pong buffer
+pub fn record_dispatch_command(curr_frame: u32, compute_stage: u32, x: u32) !void {
+    assert(curr_frame < MAX_FRAMES_IN_FLIGHT);
+    assert(compute_stage < COMPUTE_STAGE_COUNT);
+
     const device = state.device;
-    const cmd = state.compute_command_buffers[curr_frame];
+    const cmd = state.compute_command_buffers[compute_stage];
     try device.resetCommandBuffer(cmd, .{});
     try device.beginCommandBuffer(cmd, &.{});
-   
-    device.cmdBindPipeline(cmd, .compute, state.compute_pipeline);
+
+    device.cmdBindPipeline(cmd, .compute, state.compute_pipelines[compute_stage]);
     device.cmdBindDescriptorSets(cmd, .compute, state.pipeline_layout, 0, &.{state.descriptor_set[curr_frame]}, null);
     device.cmdPushConstants(cmd, state.pipeline_layout, .{ .vertex = true, .fragment = true, .compute = true }, 0,
         state.per_frame.push_constant_size, state.per_frame.push_constant);
@@ -909,18 +951,28 @@ pub fn record_dispatch_command(curr_frame: u32, x: u32) !void {
     try device.endCommandBuffer(cmd);
 }
 
-pub fn dispatch_compute(x: u32) !void {
+pub fn dispatch_compute(dispatch_x: u32, compute_stage: u32) !void {
     const device = state.device;
     const curr_frame = state.per_frame.curr_frame;
 
-    _ = try device.waitForFences(&.{state.compute_in_flight_fences[0]}, .true, std.math.maxInt(u64));
-    try device.resetFences(&.{state.compute_in_flight_fences[0]});
+    const first = compute_stage == 0;
+    if (first) {
+        _ = try device.waitForFences(&.{state.compute_in_flight_fence}, .true, std.math.maxInt(u64));
+        try device.resetFences(&.{state.compute_in_flight_fence});
+    }
 
-    try record_dispatch_command(curr_frame, x);
-    try device.queueSubmit(state.graphics_queue, &.{.{
+    try record_dispatch_command(curr_frame, compute_stage, dispatch_x);
+    // wait for the previous semaphore to finished, and signal the current one (which would in turn be waited by the next one)
+    var submit_info = v.SubmitInfo {
         .command_buffer_count = 1,
-        .p_command_buffers = &.{state.compute_command_buffers[curr_frame]},
+        .p_command_buffers = &.{state.compute_command_buffers[compute_stage]},
         .signal_semaphore_count = 1,
-        .p_signal_semaphores = &.{state.compute_finished_semas[curr_frame]},
-    }}, state.compute_in_flight_fences[0]);
+        .p_signal_semaphores = &.{state.compute_finished_semas[compute_stage]},
+    };
+    if (!first) {
+        submit_info.wait_semaphore_count = 1;
+        submit_info.p_wait_semaphores = &.{state.compute_finished_semas[compute_stage-1]};
+        submit_info.p_wait_dst_stage_mask = &.{.{.compute_shader = true}};
+    }
+    try device.queueSubmit(state.graphics_queue, &.{submit_info}, if (compute_stage == COMPUTE_STAGE_COUNT-1) state.compute_in_flight_fence else .null_handle);
 }

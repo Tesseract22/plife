@@ -1,4 +1,9 @@
+pub const KERNEL_WORKGROUP_X = 128;
 pub const MAX_PARTICLE_SPECIE = 4;
+
+pub const GRID_CELL_SIDE_COUNT = 10;
+pub const GRID_CELL_COUNT      = GRID_CELL_SIDE_COUNT * GRID_CELL_SIDE_COUNT;
+pub const GRID_CELL_SIZE       = 1.0/@as(comptime_float, GRID_CELL_SIDE_COUNT);
 
 pub const Particle = extern struct {
     pos: [2]f32,
@@ -90,6 +95,7 @@ pub const Push_Constant = extern struct {
     ping_pong: bool,
     species: [MAX_PARTICLE_SPECIE]Particle_Specie,
     specie_ct: u32,
+    particle_ct: u32,
     collision_cfg: Force_Config,
     particle_force_configs: [MAX_PARTICLE_SPECIE*MAX_PARTICLE_SPECIE]Force_Config,
 };
@@ -100,7 +106,7 @@ pub fn main(init: std.process.Init) !void {
     var rand_backend = std.Random.Xoroshiro128.init(@intCast(std.Io.Timestamp.now(io, .boot).nanoseconds));
     const rand = rand_backend.random();
 
-    var   particles  : [10000]Particle = undefined;
+    var   particles  : [40000]Particle = undefined;
     var   species    : [MAX_PARTICLE_SPECIE]Particle_Specie = undefined;
     const specie_ct  : u32 = 4;
     var   particle_force_configs : [MAX_PARTICLE_SPECIE*MAX_PARTICLE_SPECIE]Force_Config = undefined;
@@ -138,11 +144,12 @@ pub fn main(init: std.process.Init) !void {
     _ = try vulkan.init_render_pass(device);
 
     _ = try vulkan.init_command_pool(device);
-    const part_buf1 = try vulkan.create_storage_buffer(particles_size);
+    const part_buf1 = try vulkan.create_storage_buffer(particles_size, true);
     defer part_buf1.destroy();
-    const part_buf2 = try vulkan.create_storage_buffer(particles_size);
+    const part_buf2 = try vulkan.create_storage_buffer(particles_size, true);
     defer part_buf2.destroy();
-
+    const grid_offsets_buf = try vulkan.create_storage_buffer(GRID_CELL_COUNT * @sizeOf(u32), false); // no need to initialzied
+    defer grid_offsets_buf.destroy();
 
     const staging_buf = try vulkan.create_staging_buffer(particles_size);
     defer staging_buf.destroy();
@@ -154,25 +161,38 @@ pub fn main(init: std.process.Init) !void {
     try vulkan.copy_buffer(part_buf1, staging_buf, particles_size);
     try vulkan.copy_buffer(part_buf2, staging_buf, particles_size);
 
-    _ = try vulkan.init_pipeline(@sizeOf(Particle), &Particle.get_input_attrs(0), .{part_buf1.buf, part_buf2.buf}, @sizeOf(Push_Constant));
+    try vulkan.init_descriptor_set(.{part_buf1.buf, part_buf2.buf}, grid_offsets_buf.buf);
+    _ = try vulkan.init_pipeline(@sizeOf(Particle), &Particle.get_input_attrs(0), @sizeOf(Push_Constant));
     try vulkan.init_compute_pipeline();
     _ = try vulkan.init_frame_buffers(arena, device);
 
     try vulkan.init_command_buffers(device);
     try vulkan.init_sync_primitives(device);
 
+    const target_fps = 60.0;
+    const target_dt  = 1.0/target_fps;
+    var   dt: f32    = target_dt;
 
     var camera = Camera {};
     var camera_target = Camera {};
     
     var ping_pong = true;
-    var last_frame = std.Io.Timestamp.now(io, .boot);
     while (r.RGFW_window_shouldClose(window) == 0) {
         // TODO: limit frame rate
-        const now = std.Io.Timestamp.now(io, .boot);
-        const dt = @as(f32, @floatFromInt(last_frame.durationTo(now).nanoseconds)) / std.time.ns_per_s;
-        std.log.info("dt={}, fps={}", .{dt, 1.0/dt});
-        last_frame = now;
+        const start = std.Io.Timestamp.now(io, .boot);
+        defer {
+            const end = std.Io.Timestamp.now(io, .boot);
+            dt = @as(f32, @floatFromInt(start.durationTo(end).nanoseconds)) / std.time.ns_per_s;
+            if (dt < target_dt) {
+                io.sleep(.{ .nanoseconds = @intFromFloat((target_dt - dt) * std.time.ns_per_s) }, .boot)
+                    catch unreachable;
+                dt = target_dt;
+            }
+
+        }
+        if (vulkan.state.frame_counter % 20 == 0) {
+            std.log.info("dt={}, fps={}", .{dt, 1.0/dt});
+        }
 
         // FIXME: when window resized, we need to recreate swap chain
         r.RGFW_pollEvents();
@@ -208,9 +228,10 @@ pub fn main(init: std.process.Init) !void {
         camera.pos[1] = exp_smooth(camera.pos[1], camera_target.pos[1], dt * CAMERA_SMOOTH_SPD);
 
         vulkan.set_push_constant(Push_Constant, &.{
-            .camera = camera, .species = species, .specie_ct = specie_ct,
+            .camera = camera, .species = species, .specie_ct = specie_ct, .particle_ct = particles.len,
             .collision_cfg = collision_cfg, .particle_force_configs = particle_force_configs, .ping_pong = ping_pong });
-        try vulkan.dispatch_compute(particles.len);
+        try vulkan.dispatch_compute((particles.len+KERNEL_WORKGROUP_X-1)/KERNEL_WORKGROUP_X, 0);
+        try vulkan.dispatch_compute((particles.len+KERNEL_WORKGROUP_X-1)/KERNEL_WORKGROUP_X, 1);
         try vulkan.draw_frame(@intCast(particles.len * VERT_PER_PARTICLE), part_buf1.buf);
         ping_pong = !ping_pong;
     }

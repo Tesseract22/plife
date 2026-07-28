@@ -20,11 +20,11 @@ pub const Vertex = struct {
     // });
 
     const constant = @extern(*addrspace(.push_constant) driver.Push_Constant, .{.name = "push_constant"});
-    const particles1 = @extern(*addrspace(.storage_buffer) const ParticleArray , .{
+    const particles1 = @extern(*addrspace(.storage_buffer) const Particle_Array , .{
         .name = "particles1",
         .decoration = .{ .descriptor = .{ .set = 0, .binding = 0 } },
     });
-    const particles2 = @extern(*addrspace(.storage_buffer) const ParticleArray , .{
+    const particles2 = @extern(*addrspace(.storage_buffer) const Particle_Array , .{
         .name = "particles2",
         .decoration = .{ .descriptor = .{ .set = 0, .binding = 1 } },
     });
@@ -121,10 +121,8 @@ pub const Compute = struct {
         const collision_force = linear_force(constant.collision_cfg, d);
 
         const interact_cfg_ab = constant.particle_force_configs[a.specie * constant.specie_ct + b.specie];
-        //const interact_cfg_ba = particle_force_configs.items[b.kind * particle_kind + a.kind];
         const interact_force_ab = linear_force(interact_cfg_ab, d);
-        //const interact_force_ba = linear_force(interact_cfg_ba, d);
-        
+
         // if (d == 0) {
         //     // const random_unit = get_random_unit_sphere(global_random);
         //     const random_unit = V2 {1,0};
@@ -137,18 +135,25 @@ pub const Compute = struct {
 
     }
 
-    const particle_drag = 20;
+    // TODO: make this configurable from CPU
+    const PARTICLE_DRAG = 20;
+    const boundary_mode: enum { clamp, wrap } = .wrap;
 
-    pub fn main() callconv(.{ .spirv_kernel = .{.x=1,.y=1,.z=1}}) void {
+    const particles_in = @extern(*addrspace(.storage_buffer) Particle_Array , .{
+        .name = "particles1",
+        .decoration = .{ .descriptor = .{ .set = 0, .binding = 0 } },
+    });
+    const particles_out = @extern(*addrspace(.storage_buffer) Particle_Array , .{
+        .name = "particles2",
+        .decoration = .{ .descriptor = .{ .set = 0, .binding = 1 } },
+    });
+    const grid_offsets = @extern(*addrspace(.storage_buffer) U32_Array , .{
+        .name = "grid_offsets",
+        .decoration = .{ .descriptor = .{ .set = 0, .binding = 2 } },
+    });
+
+    pub fn main() callconv(.{ .spirv_kernel = .{.x=driver.KERNEL_WORKGROUP_X,.y=1,.z=1}}) void {
         const dt = 1.0/60.0;
-        const particles_in = @extern(*addrspace(.storage_buffer) ParticleArray , .{
-            .name = "particles1",
-            .decoration = .{ .descriptor = .{ .set = 0, .binding = 0 } },
-        });
-        const particles_out = @extern(*addrspace(.storage_buffer) ParticleArray , .{
-            .name = "particles2",
-            .decoration = .{ .descriptor = .{ .set = 0, .binding = 1 } },
-        });
         const i = spirv.global_invocation_id[0];
         if (i >= particles_in.ptr.len) return;
 
@@ -159,33 +164,70 @@ pub const Compute = struct {
             spd = spd + compute_interaction(particles_in.ptr[i], particles_in.ptr[j]) * splat2(dt);
         }
         pos = pos + splat2(dt) * spd;
-        spd = spd * splat2(@exp(-particle_drag*dt*len(spd)));
-        if (pos[1] < -1) {
-            pos[1] = -1;
-            spd[1] = -spd[1];
-        }
-        if (pos[0] < -1) {
-            pos[0] = -1;
-            spd[0] = -spd[0];
-        }
-        if (pos[1] > 1.0) {
-            pos[1] = 1.0;
-            spd[1] = -spd[1];
-        }
-        if (pos[0] > 1) {
-            pos[0] = 1;
-            spd[0] = -spd[0];
+        spd = spd * splat2(@exp(-PARTICLE_DRAG*dt*len(spd)));
+        switch (boundary_mode) {
+            .clamp => {
+                if (pos[1] < -1) {
+                    pos[1] = -1;
+                    spd[1] = -spd[1];
+                }
+                if (pos[0] < -1) {
+                    pos[0] = -1;
+                    spd[0] = -spd[0];
+                }
+                if (pos[1] > 1.0) {
+                    pos[1] = 1.0;
+                    spd[1] = -spd[1];
+                }
+                if (pos[0] > 1) {
+                    pos[0] = 1;
+                    spd[0] = -spd[0];
+                }
+            },
+            .wrap => {
+                if (pos[0] > 1 or pos[0] < -1) {
+                    pos[0] = std.math.clamp(-pos[0], -1, 1);
+                }
+                if (pos[1] > 1 or pos[1] < -1) {
+                    pos[1] = std.math.clamp(-pos[1], -1, 1);
+                }
+            },
         }
         particles_out.ptr[i].spd = spd;
         particles_out.ptr[i].pos = pos;
     }
 
+    pub const GRID_CELL_SIDE_COUNT = driver.GRID_CELL_SIDE_COUNT;
+    pub const GRID_CELL_COUNT      = driver.GRID_CELL_COUNT;
+    pub const GRID_CELL_SIZE       = driver.GRID_CELL_SIZE;
+
+
+    pub fn cell_from_pos(pos: V2) @Vector(2, u32) {
+        const x = std.math.clamp(pos[0], 0, 0.999999999);
+        const y = std.math.clamp(pos[1], 0, 0.999999999);
+        const bin_coord_f = V2{x,y} / splat2(GRID_CELL_SIZE);
+        return @floor(bin_coord_f);
+    }
+
+    pub fn bin_from_cell(coord: [2]u32) u32 {
+        return coord[1] * GRID_CELL_SIDE_COUNT + coord[0];
+    }
+
+    pub fn compute_grid_offsets() callconv(.{ .spirv_kernel = .{.x=driver.KERNEL_WORKGROUP_X,.y=1,.z=1}}) void {
+        const i = spirv.global_invocation_id[0];
+        const particle = particles_in.ptr[i];
+        const cell = cell_from_pos(particle.pos);
+        const bin = bin_from_cell(cell);
+
+        _ = @atomicRmw(u32, &grid_offsets.ptr[bin], .Add, 1, .monotonic);
+    }
 };
 
 comptime {
     @export(&Vertex.main,   .{ .name = "vert" });
     @export(&Fragment.main, .{ .name = "frag" });
-    @export(&Compute.main, .{ .name = "compute" });
+    @export(&Compute.main,  .{ .name = "compute" });
+    @export(&Compute.compute_grid_offsets, .{ .name = "compute_grid_offsets"});
 }
 
 const V2 = @Vector(2, f32);
@@ -204,7 +246,8 @@ fn SpirvArray(comptime T: type) type {
         ptr: @SpirvType(.{ .runtime_array = T }),
     };
 }
-const ParticleArray = SpirvArray(driver.Particle);
+const Particle_Array = SpirvArray(driver.Particle);
+const U32_Array      = SpirvArray(u32);
 
 pub fn dist2(a: V2, b: V2) f32 {
     return len2(a-b);
