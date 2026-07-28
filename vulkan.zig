@@ -30,23 +30,30 @@ compute_queue     : v.Queue = .null_handle,
 
 swapchain         : v.SwapchainKHR = .null_handle,
 
-vert              : v.ShaderModule = .null_handle,
-frag              : v.ShaderModule = .null_handle,
+shader            : v.ShaderModule = .null_handle,
+// frag              : v.ShaderModule = .null_handle,
 render_pass       : v.RenderPass = .null_handle,
 frame_buffers     : []v.Framebuffer = &.{},
 image_views       : []v.ImageView = &.{},
 
+descriptor_set_layout : v.DescriptorSetLayout = .null_handle,
 pipeline_layout   : v.PipelineLayout = .null_handle,
 descriptor_pool   : v.DescriptorPool = .null_handle,
-descriptor_set    : v.DescriptorSet = .null_handle,
+descriptor_set    : [MAX_FRAMES_IN_FLIGHT]v.DescriptorSet = .{.null_handle, .null_handle},
 graphics_pipeline : v.Pipeline = .null_handle,
+compute_pipeline  : v.Pipeline = .null_handle,
 
-command_pool      : v.CommandPool = .null_handle,
-command_buffers   : [MAX_FRAMES_IN_FLIGHT]v.CommandBuffer = undefined,
+command_pool               : v.CommandPool = .null_handle,
+graphics_command_buffers   : [MAX_FRAMES_IN_FLIGHT]v.CommandBuffer = undefined,
+compute_command_buffers    : [MAX_FRAMES_IN_FLIGHT]v.CommandBuffer = undefined,
 
-image_available_semas : [MAX_FRAMES_IN_FLIGHT]v.Semaphore = undefined,
-render_finished_semas : [MAX_FRAMES_IN_FLIGHT]v.Semaphore = undefined,
-in_flight_fences      : [MAX_FRAMES_IN_FLIGHT]v.Fence = undefined,
+image_available_semas         : [MAX_FRAMES_IN_FLIGHT]v.Semaphore = undefined,
+render_finished_semas         : [MAX_FRAMES_IN_FLIGHT]v.Semaphore = undefined,
+in_flight_fences              : [MAX_FRAMES_IN_FLIGHT]v.Fence = undefined,
+compute_finished_semas        : [MAX_FRAMES_IN_FLIGHT]v.Semaphore = undefined,
+compute_in_flight_fences      : [MAX_FRAMES_IN_FLIGHT]v.Fence = undefined,
+
+frame_counter: u32 = 0,
 
 per_frame: struct {
     curr_frame: u32 = 0,
@@ -56,7 +63,7 @@ per_frame: struct {
 // pub fn init_window(w: u32, h: u32, name: []const u8) void {
 //
 // }
-pub const MAX_FRAMES_IN_FLIGHT = 3;
+pub const MAX_FRAMES_IN_FLIGHT = 2;
 pub var state = Vulkan {};
 const vkGetInstanceProcAddr = @extern(v.PfnGetInstanceProcAddr, .{
     .name = "vkGetInstanceProcAddr",
@@ -176,11 +183,10 @@ pub fn init_device(arena: std.mem.Allocator, window_width: u32, window_height: u
             .p_queue_priorities = priority.ptr,
         },
     };
-    const device_feature = v.PhysicalDeviceFeatures {};
+    const device_feature = v.PhysicalDeviceFeatures {
+};
     const extensions: []const [*:0]const u8 = &.{
         v.extensions.khr_swapchain.name,
-        v.extensions.khr_storage_buffer_storage_class.name,
-        v.extensions.khr_variable_pointers.name,
     };
     var enabled_vulkan11_features = v.PhysicalDeviceVulkan11Features{
         .variable_pointers = .true,
@@ -254,12 +260,13 @@ pub const Queues = struct {
 
 pub fn init_queues(device: Device) void {
     state.graphics_queue = device.getDeviceQueue(state.graphics_compute_family, 0);
-    state.present_queue  = device.getDeviceQueue(state.present_family, 0);
+    state.present_queue = state.graphics_queue;
+    // state.present_queue  = device.getDeviceQueue(state.present_family, 0);
     state.compute_queue  = device.getDeviceQueue(state.graphics_compute_family, 0);
 }
 
 pub fn init_swapchain(device: Device) !v.SwapchainKHR {
-    const image_count = state.surface_details.min_image_count + 1;
+    const image_count = state.surface_details.min_image_count;
     assert(state.surface_details.max_image_count != 0 and image_count <= state.surface_details.max_image_count);
 
     var create_info = v.SwapchainCreateInfoKHR {
@@ -280,6 +287,7 @@ pub fn init_swapchain(device: Device) !v.SwapchainKHR {
         .old_swapchain = .null_handle,
     };
     if (state.graphics_compute_family != state.present_family) {
+        log.info("different queue", .{});
         create_info.image_sharing_mode = .concurrent;
         create_info.queue_family_index_count = 2;
         create_info.p_queue_family_indices = &.{ state.graphics_compute_family, state.present_family };
@@ -331,19 +339,24 @@ pub fn cleanup() void {
         device.destroySemaphore(sema, null);
     for (state.in_flight_fences) |fence|
         device.destroyFence(fence, null);
+    for (state.compute_finished_semas) |sema|
+        device.destroySemaphore(sema, null);
+    for (state.compute_in_flight_fences) |fence|
+        device.destroyFence(fence, null);
 
     device.destroyDescriptorPool(state.descriptor_pool, null);
     device.destroyCommandPool(state.command_pool, null);
 
+    device.destroyDescriptorSetLayout(state.descriptor_set_layout, null);
     device.destroyPipelineLayout(state.pipeline_layout, null);
     device.destroyRenderPass(state.render_pass, null);
     device.destroyPipeline(state.graphics_pipeline, null);
+    device.destroyPipeline(state.compute_pipeline, null);
 
     for (state.frame_buffers) |frame_buffer|
         device.destroyFramebuffer(frame_buffer, null);
 
-    device.destroyShaderModule(state.vert, null);
-    device.destroyShaderModule(state.frag, null);
+    device.destroyShaderModule(state.shader, null);
     for (state.image_views) |image_view|
         device.destroyImageView(image_view, null);
     device.destroySwapchainKHR(state.swapchain, null);
@@ -375,15 +388,8 @@ pub fn create_shader_module(src: []align(4) const u8) !v.ShaderModule {
     return state.device.createShaderModule(&create_info, null);
 }
 
-pub const ShaderModules = struct {
-    vert: v.ShaderModule,
-    frag: v.ShaderModule,
-};
-
-pub fn init_shader_modules() !ShaderModules {
-    state.vert = try create_shader_module(@alignCast(@embedFile("shader.spv")));
-    state.frag = try create_shader_module(@alignCast(@embedFile("shader.spv")));
-    return .{ .vert = state.vert, .frag = state.frag };
+pub fn init_shader_modules() !void {
+    state.shader = try create_shader_module(@alignCast(@embedFile("shader.spv")));
 }
 
 pub fn init_render_pass(device: Device) !v.RenderPass {
@@ -431,7 +437,7 @@ pub fn init_render_pass(device: Device) !v.RenderPass {
     return state.render_pass;
 }
 
-pub fn init_frame_buffers(arena: std.mem.Allocator, device: Device) ![]v.Framebuffer {
+pub fn init_frame_buffers(arena: std.mem.Allocator, device: Device) !void {
     state.frame_buffers = try arena.alloc(v.Framebuffer, state.image_views.len);
     for (state.image_views, state.frame_buffers) |image_view, *frame_buffer| {
         const attachments: []const v.ImageView = &.{image_view};
@@ -444,23 +450,23 @@ pub fn init_frame_buffers(arena: std.mem.Allocator, device: Device) ![]v.Framebu
             .layers = 1,
         }, null);
     }
-    return state.frame_buffers;
 }
 
 pub fn init_pipeline(
     vert_input_stride: usize,
     vert_input_attrs: []const v.VertexInputAttributeDescription,
-    ssbo: v.Buffer, push_constant_size: usize) !v.Pipeline {
+    ssbo: [MAX_FRAMES_IN_FLIGHT]v.Buffer,
+    push_constant_size: usize) !v.Pipeline {
     const device = state.device;
 
     const vert_create_info = v.PipelineShaderStageCreateInfo {
         .stage = .{ .vertex = true },
-        .module = state.vert,
+        .module = state.shader,
         .p_name = "vert",
     };
     const frag_create_info = v.PipelineShaderStageCreateInfo {
         .stage = .{ .fragment = true },
-        .module = state.frag,
+        .module = state.shader,
         .p_name = "frag",
     };
 
@@ -544,78 +550,93 @@ pub fn init_pipeline(
         .blend_constants = .{0,0,0,0},
     };
 
+    const push_constant_ranges = [_]v.PushConstantRange{.{
+        .stage_flags = .{ .vertex = true, .fragment = true, .compute = true },
+        .offset = 0,
+        .size = @intCast(push_constant_size),
+    }};
+
     const bindings = [_]v.DescriptorSetLayoutBinding{
         .{
             .binding = 0,
             .descriptor_type = .storage_buffer,
             .descriptor_count = 1,
-            .stage_flags = .{ .vertex = true },
+            .stage_flags = .{ .vertex = true, .compute = true },
         },
-        // .{
-        //     .binding = 1,
-        //     .descriptor_type = .storage_buffer,
-        //     .descriptor_count = 1,
-        //     .stage_flags = .{ .vertex = true },
-        // },
+        .{
+            .binding = 1,
+            .descriptor_type = .storage_buffer,
+            .descriptor_count = 1,
+            .stage_flags = .{ .vertex = true, .compute = true },
+        },
     };
-    const descriptor_set_layout = try state.device.createDescriptorSetLayout(&.{
+
+    state.descriptor_set_layout = try state.device.createDescriptorSetLayout(&.{
         .binding_count = @intCast(bindings.len),
         .p_bindings = &bindings,
     }, null);
-
-    const push_constant_ranges = [_]v.PushConstantRange{.{
-        .stage_flags = .{ .vertex = true, .fragment = true },
-        .offset = 0,
-        .size = @intCast(push_constant_size),
-    }};
     state.pipeline_layout = try state.device.createPipelineLayout(&.{
         .set_layout_count = 1,
-        .p_set_layouts = &.{descriptor_set_layout},
+        .p_set_layouts = &.{state.descriptor_set_layout},
         .push_constant_range_count = 1,
         .p_push_constant_ranges = &push_constant_ranges,
     }, null);
-    defer device.destroyDescriptorSetLayout(descriptor_set_layout, null);
 
     {
         state.descriptor_pool = try device.createDescriptorPool(&.{
-            .max_sets = 1,
-            .pool_size_count = 1,
-            .p_pool_sizes = &.{.{
-                .type = .storage_buffer,
-                .descriptor_count = 2,
-            }},
+            .max_sets = MAX_FRAMES_IN_FLIGHT,
+            .pool_size_count = MAX_FRAMES_IN_FLIGHT,
+            .p_pool_sizes = &.{
+                .{
+                    .type = .storage_buffer,
+                    .descriptor_count = 2,
+                },
+                .{
+                    .type = .storage_buffer,
+                    .descriptor_count = 2,
+                }
+            },
         }, null);
         // defer device.destroyDescriptorPool(state.descriptor_pool, null);
 
         // Allocate
         try device.allocateDescriptorSets(&.{
             .descriptor_pool = state.descriptor_pool,
-            .descriptor_set_count = 1,
-            .p_set_layouts = @ptrCast(&descriptor_set_layout),
-        }, @ptrCast(&state.descriptor_set));
+            .descriptor_set_count = state.descriptor_set.len,
+            .p_set_layouts = &.{state.descriptor_set_layout, state.descriptor_set_layout}, // same layout for both set
+        }, &state.descriptor_set);
 
-        // Write buffer references into the set
-        const ssbo_info = v.DescriptorBufferInfo{
-            .buffer = ssbo,
-            .offset = 0,
-            .range = v.WHOLE_SIZE,
-        };
+        for (0..MAX_FRAMES_IN_FLIGHT) |i| {
+            // Write buffer references into the set
+            const ssbo_info = [_]v.DescriptorBufferInfo {.
+                {
+                    .buffer = ssbo[i],
+                    .offset = 0,
+                    .range = v.WHOLE_SIZE,
+                },
+                .{
+                    .buffer = ssbo[(i+1)%MAX_FRAMES_IN_FLIGHT],
+                    .offset = 0,
+                    .range = v.WHOLE_SIZE,
+                }
+            };
 
-        const writes = [_]v.WriteDescriptorSet{
-            .{
-                .dst_set = state.descriptor_set,
-                .dst_binding = 0,
-                .dst_array_element = 0,
-                .descriptor_count = 1,
-                .descriptor_type = .storage_buffer,
-                .p_buffer_info = @ptrCast(&ssbo_info),
+            const writes = [_]v.WriteDescriptorSet{
+                .{
+                    .dst_set = state.descriptor_set[i],
+                    .dst_binding = 0,
+                    .dst_array_element = 0,
+                    .descriptor_count = 2,
+                    .descriptor_type = .storage_buffer,
+                    .p_buffer_info = &ssbo_info,
 
-                .p_image_info = &.{},
-                .p_texel_buffer_view = &.{},
-            },
-        };
+                    .p_image_info = &.{},
+                    .p_texel_buffer_view = &.{},
+                },
+            };
 
-        device.updateDescriptorSets(&writes, null);
+            device.updateDescriptorSets(&writes, null);
+        }
     }
 
     const graphics_pipeline_info = v.GraphicsPipelineCreateInfo {
@@ -638,6 +659,21 @@ pub fn init_pipeline(
     return state.graphics_pipeline;
 }
 
+pub fn init_compute_pipeline() !void {
+    const device = state.device;
+
+    const compute_shader_info = v.PipelineShaderStageCreateInfo {
+        .stage = .{ .compute = true },
+        .module = state.shader,
+        .p_name = "compute",
+    };
+    _ = try device.createComputePipelines(.null_handle, &.{.{
+        .layout = state.pipeline_layout,
+        .stage  = compute_shader_info,
+        .base_pipeline_index = -1,
+    }}, null, @ptrCast(&state.compute_pipeline));
+}
+
 pub fn init_command_pool(device: Device) !v.CommandPool {
     state.command_pool = try device.createCommandPool(&.{
         .flags = .{ .reset_command_buffer = true },
@@ -648,13 +684,17 @@ pub fn init_command_pool(device: Device) !v.CommandPool {
 
 pub const CommandBuffers = [MAX_FRAMES_IN_FLIGHT]v.CommandBuffer;
 
-pub fn init_command_buffers(device: Device) !CommandBuffers {
+pub fn init_command_buffers(device: Device) !void {
     try device.allocateCommandBuffers(&.{
         .command_pool = state.command_pool,
         .level = .primary,
         .command_buffer_count = MAX_FRAMES_IN_FLIGHT,
-    }, &state.command_buffers);
-    return state.command_buffers;
+    }, &state.graphics_command_buffers);
+    try device.allocateCommandBuffers(&.{
+        .command_pool = state.command_pool,
+        .level = .primary,
+        .command_buffer_count = MAX_FRAMES_IN_FLIGHT,
+    }, &state.compute_command_buffers);
 }
 
 pub fn find_mem_type(filter: u32, properties: v.MemoryPropertyFlags) u32 {
@@ -746,11 +786,19 @@ pub fn map_mem(mem: v.DeviceMemory, comptime T: type, len: usize) ![]T {
 } 
 
 pub fn init_sync_primitives(device: Device) !void {
-    for (0..MAX_FRAMES_IN_FLIGHT) |i| { state.image_available_semas[i] = try device.createSemaphore(&.{}, null);
+    for (0..MAX_FRAMES_IN_FLIGHT) |i| {
+        state.image_available_semas[i] = try device.createSemaphore(&.{}, null);
         state.render_finished_semas[i] =
             try device.createSemaphore(&.{}, null);
         state.in_flight_fences[i] =
-            try device.createFence(&.{ .flags = .{ .signaled = true } }, null); }
+            try device.createFence(&.{ .flags = .{ .signaled = true } }, null);
+
+        state.compute_finished_semas[i] =
+            try device.createSemaphore(&.{}, null);
+        state.compute_in_flight_fences[i] =
+            try device.createFence(&.{ .flags = .{ .signaled = true } }, null);
+
+    }
 }
 
 pub fn draw_frame(vertex_count: u32, vertex_buf: v.Buffer) !void {
@@ -760,7 +808,7 @@ pub fn draw_frame(vertex_count: u32, vertex_buf: v.Buffer) !void {
     try record_command_buffers(curr_frame.*, image_idx, vertex_count, vertex_buf);
     try submit_command_buffer(curr_frame.*, image_idx);
     curr_frame.* = (curr_frame.* + 1) % MAX_FRAMES_IN_FLIGHT;
-
+    // state.frame_counter += 1;
 }
 
 pub fn acquire_image(curr_frame: u32) !u32 {
@@ -775,9 +823,8 @@ pub fn acquire_image(curr_frame: u32) !u32 {
 pub fn record_command_buffers(
     curr_frame: u32, image_idx: u32,
     vertex_count: u32, vertex_buf: v.Buffer) !void {
-    const command_buffers = state.command_buffers;
     const device = state.device;
-    const command_buffer = command_buffers[curr_frame];
+    const command_buffer = state.graphics_command_buffers[curr_frame];
 
     try device.resetCommandBuffer(command_buffer, .{});
     try device.beginCommandBuffer(command_buffer, &.{});
@@ -802,11 +849,11 @@ pub fn record_command_buffers(
     device.cmdSetScissor(command_buffer, 0, &.{state.scissor});
 
     if (state.per_frame.push_constant_size > 0)
-    device.cmdPushConstants(command_buffer, state.pipeline_layout, .{ .vertex = true, .fragment = true }, 0,
+    device.cmdPushConstants(command_buffer, state.pipeline_layout, .{ .vertex = true, .fragment = true, .compute = true }, 0,
         state.per_frame.push_constant_size, state.per_frame.push_constant);
 
     device.cmdBindDescriptorSets(command_buffer,
-        .graphics, state.pipeline_layout, 0, &.{ state.descriptor_set }, null);
+        .graphics, state.pipeline_layout, 0, &.{ state.descriptor_set[curr_frame] }, null);
     device.cmdBindVertexBuffers(command_buffer, 0, &.{vertex_buf}, &.{0});
     device.cmdDraw(command_buffer, vertex_count, 1, 0, 0);
     device.cmdEndRenderPass(command_buffer);
@@ -816,16 +863,17 @@ pub fn record_command_buffers(
 pub fn submit_command_buffer(curr_frame: u32, image_idx: u32) !void {
     const device = state.device;
     const wait_semas: []const v.Semaphore = &.{
-        state.image_available_semas[curr_frame],
+        state.compute_finished_semas[curr_frame],
+        state.image_available_semas[curr_frame]
     };
     const signal_semas: []const v.Semaphore = &.{
         state.render_finished_semas[curr_frame],
     };
-    const curr_command_buffers = state.command_buffers[curr_frame..curr_frame+1];
+    const curr_command_buffers = state.graphics_command_buffers[curr_frame..curr_frame+1];
     try device.queueSubmit(state.graphics_queue, &.{.{
         .wait_semaphore_count = @intCast(wait_semas.len),
         .p_wait_semaphores = wait_semas.ptr,
-        .p_wait_dst_stage_mask = &.{ .{ .color_attachment_output = true } },
+        .p_wait_dst_stage_mask = &.{ .{ .vertex_input = true }, .{ .color_attachment_output = true } },
         .command_buffer_count = @intCast(curr_command_buffers.len),
         .p_command_buffers = curr_command_buffers.ptr,
         .signal_semaphore_count = @intCast(signal_semas.len),
@@ -843,4 +891,36 @@ pub fn submit_command_buffer(curr_frame: u32, image_idx: u32) !void {
 pub fn set_push_constant(comptime T: type, data: *const T) void {
     state.per_frame.push_constant = data;
     state.per_frame.push_constant_size = @sizeOf(T);
+}
+
+pub fn record_dispatch_command(curr_frame: u32, x: u32) !void {
+    const device = state.device;
+    const cmd = state.compute_command_buffers[curr_frame];
+    try device.resetCommandBuffer(cmd, .{});
+    try device.beginCommandBuffer(cmd, &.{});
+   
+    device.cmdBindPipeline(cmd, .compute, state.compute_pipeline);
+    device.cmdBindDescriptorSets(cmd, .compute, state.pipeline_layout, 0, &.{state.descriptor_set[curr_frame]}, null);
+    device.cmdPushConstants(cmd, state.pipeline_layout, .{ .vertex = true, .fragment = true, .compute = true }, 0,
+        state.per_frame.push_constant_size, state.per_frame.push_constant);
+
+    device.cmdDispatch(cmd, x, 1, 1);
+
+    try device.endCommandBuffer(cmd);
+}
+
+pub fn dispatch_compute(x: u32) !void {
+    const device = state.device;
+    const curr_frame = state.per_frame.curr_frame;
+
+    _ = try device.waitForFences(&.{state.compute_in_flight_fences[0]}, .true, std.math.maxInt(u64));
+    try device.resetFences(&.{state.compute_in_flight_fences[0]});
+
+    try record_dispatch_command(curr_frame, x);
+    try device.queueSubmit(state.graphics_queue, &.{.{
+        .command_buffer_count = 1,
+        .p_command_buffers = &.{state.compute_command_buffers[curr_frame]},
+        .signal_semaphore_count = 1,
+        .p_signal_semaphores = &.{state.compute_finished_semas[curr_frame]},
+    }}, state.compute_in_flight_fences[0]);
 }

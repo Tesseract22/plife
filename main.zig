@@ -1,7 +1,8 @@
-pub const MAX_PARTICLE_SPECIE = 10;
+pub const MAX_PARTICLE_SPECIE = 4;
 
 pub const Particle = extern struct {
     pos: [2]f32,
+    spd: [2]f32,
     specie: u32,
 
     pub fn get_input_attrs(binding: u32) [2]v.VertexInputAttributeDescription {
@@ -27,6 +28,11 @@ pub const Particle_Specie = extern struct {
     color: [3]f32,
 };
 
+pub const Force_Config = extern struct {
+    radius: f32,
+    strength: f32, // >0 -> repel, <0 -> attract
+};
+
 fn float_range(random: std.Random, min: f32, max: f32) f32 {
     return random.float(f32) * (max - min) + min;
 }
@@ -42,7 +48,34 @@ pub fn generate_particle(particles: []Particle, specie_count: usize, rand: std.R
     assert(specie_count <= MAX_PARTICLE_SPECIE);
     for (particles) |*p| {
         p.pos = .{ float_range(rand, -1, 1), float_range(rand, -1, 1) };
+        p.spd = .{ float_range(rand, -1, 1), float_range(rand, -1, 1) };
         p.specie = rand.int(u8) % @as(u8, @intCast(specie_count));
+    }
+}
+
+const particle_drag = 20;
+var r_force_radius_max: f32 = 0.099;
+var r_force_radius_min: f32 = 0.05;
+var r_force_strength_max: f32 = 0.20;
+var r_force_strength_min: f32 = 0.05;
+
+fn random_sign(random: std.Random) f32 {
+    return if (random.boolean()) 1 else -1;
+}
+
+pub fn randomize_config(particle_force_configs: []Force_Config, specie_ct: u32, rand: std.Random) void {
+    assert(particle_force_configs.len == specie_ct * specie_ct);
+    // particle_kind = random.int(u8) % 5 + 2;
+    var i: usize = 0;
+    for (0..specie_ct) |_| {
+        for (0..specie_ct) |_| {
+            particle_force_configs[i] = 
+                .{
+                    .radius = float_range(rand, r_force_radius_min, r_force_radius_max),
+                    .strength = random_sign(rand) * float_range(rand, r_force_strength_min, r_force_strength_max),
+                };
+            i += 1;
+        }
     }
 }
 
@@ -53,7 +86,12 @@ pub const Camera = extern struct {
 
 pub const Push_Constant = extern struct {
     camera: Camera,
+
+    ping_pong: bool,
     species: [MAX_PARTICLE_SPECIE]Particle_Specie,
+    specie_ct: u32,
+    collision_cfg: Force_Config,
+    particle_force_configs: [MAX_PARTICLE_SPECIE*MAX_PARTICLE_SPECIE]Force_Config,
 };
 
 pub fn main(init: std.process.Init) !void {
@@ -62,13 +100,20 @@ pub fn main(init: std.process.Init) !void {
     var rand_backend = std.Random.Xoroshiro128.init(@intCast(std.Io.Timestamp.now(io, .boot).nanoseconds));
     const rand = rand_backend.random();
 
-    var   particles  : [1000]Particle = undefined;
+    var   particles  : [10000]Particle = undefined;
     var   species    : [MAX_PARTICLE_SPECIE]Particle_Specie = undefined;
-    const species_ct : u32 = 3;
+    const specie_ct  : u32 = 4;
+    var   particle_force_configs : [MAX_PARTICLE_SPECIE*MAX_PARTICLE_SPECIE]Force_Config = undefined;
+    const collision_cfg = Force_Config {
+        .radius = 0.025,
+        .strength = 0.6,
+    };
+
 
     const particles_size = @sizeOf(Particle) * particles.len;
     randomize_particle_specie(&species, rand);
-    generate_particle(&particles, species_ct, rand);
+    randomize_config(particle_force_configs[0..specie_ct*specie_ct], specie_ct, rand);
+    generate_particle(&particles, specie_ct, rand);
 
 
     const WINDOW_W = 1000;
@@ -89,12 +134,15 @@ pub fn main(init: std.process.Init) !void {
     vulkan.init_queues(device);
     _ = try vulkan.init_swapchain(device);
     _ = try vulkan.init_image_views(arena, device);
-    _ = try vulkan.init_shader_modules();
+    try vulkan.init_shader_modules();
     _ = try vulkan.init_render_pass(device);
 
     _ = try vulkan.init_command_pool(device);
-    const vert_buf = try vulkan.create_storage_buffer(particles_size);
-    defer vert_buf.destroy();
+    const part_buf1 = try vulkan.create_storage_buffer(particles_size);
+    defer part_buf1.destroy();
+    const part_buf2 = try vulkan.create_storage_buffer(particles_size);
+    defer part_buf2.destroy();
+
 
     const staging_buf = try vulkan.create_staging_buffer(particles_size);
     defer staging_buf.destroy();
@@ -103,21 +151,27 @@ pub fn main(init: std.process.Init) !void {
     @memcpy(staging_mapped, &particles);
     device.unmapMemory(staging_buf.mem);
 
-    try vulkan.copy_buffer(vert_buf, staging_buf, particles_size);
+    try vulkan.copy_buffer(part_buf1, staging_buf, particles_size);
+    try vulkan.copy_buffer(part_buf2, staging_buf, particles_size);
 
-    _ = try vulkan.init_pipeline(@sizeOf(Particle), &Particle.get_input_attrs(0), vert_buf.buf, @sizeOf(Push_Constant));
+    _ = try vulkan.init_pipeline(@sizeOf(Particle), &Particle.get_input_attrs(0), .{part_buf1.buf, part_buf2.buf}, @sizeOf(Push_Constant));
+    try vulkan.init_compute_pipeline();
     _ = try vulkan.init_frame_buffers(arena, device);
 
-    _ = try vulkan.init_command_buffers(device);
+    try vulkan.init_command_buffers(device);
     try vulkan.init_sync_primitives(device);
+
 
     var camera = Camera {};
     var camera_target = Camera {};
     
+    var ping_pong = true;
     var last_frame = std.Io.Timestamp.now(io, .boot);
     while (r.RGFW_window_shouldClose(window) == 0) {
+        // TODO: limit frame rate
         const now = std.Io.Timestamp.now(io, .boot);
         const dt = @as(f32, @floatFromInt(last_frame.durationTo(now).nanoseconds)) / std.time.ns_per_s;
+        std.log.info("dt={}, fps={}", .{dt, 1.0/dt});
         last_frame = now;
 
         // FIXME: when window resized, we need to recreate swap chain
@@ -138,9 +192,11 @@ pub fn main(init: std.process.Init) !void {
 
         if (r.RGFW_isKeyPressed(r.RGFW_keyR) == 1) {
             randomize_particle_specie(&species, rand);
-            generate_particle(&particles, species_ct, rand);
+            randomize_config(particle_force_configs[0..specie_ct*specie_ct], specie_ct, rand);
+            generate_particle(&particles, specie_ct, rand);
             @memcpy(staging_mapped, &particles);
-            try vulkan.copy_buffer(vert_buf, staging_buf, particles_size);
+            try vulkan.copy_buffer(part_buf1, staging_buf, particles_size);
+            try vulkan.copy_buffer(part_buf2, staging_buf, particles_size);
         }
 
         const scroll = get_mouse_scroll();
@@ -151,8 +207,12 @@ pub fn main(init: std.process.Init) !void {
         camera.pos[0] = exp_smooth(camera.pos[0], camera_target.pos[0], dt * CAMERA_SMOOTH_SPD);
         camera.pos[1] = exp_smooth(camera.pos[1], camera_target.pos[1], dt * CAMERA_SMOOTH_SPD);
 
-        vulkan.set_push_constant(Push_Constant, &.{ .camera = camera, .species = species });
-        try vulkan.draw_frame(@intCast(particles.len * VERT_PER_PARTICLE), vert_buf.buf);
+        vulkan.set_push_constant(Push_Constant, &.{
+            .camera = camera, .species = species, .specie_ct = specie_ct,
+            .collision_cfg = collision_cfg, .particle_force_configs = particle_force_configs, .ping_pong = ping_pong });
+        try vulkan.dispatch_compute(particles.len);
+        try vulkan.draw_frame(@intCast(particles.len * VERT_PER_PARTICLE), part_buf1.buf);
+        ping_pong = !ping_pong;
     }
     try device.deviceWaitIdle();
 
