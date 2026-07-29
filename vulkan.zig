@@ -1,4 +1,5 @@
 const Vulkan = @This();
+const HDR_FORMAT = v.Format.r16g16b16a16_sfloat;
 pub const MAX_FRAMES_IN_FLIGHT = 2;
 pub const COMPUTE_STAGE_COUNT  = 2;
 vkb: v.BaseWrapper = undefined,
@@ -33,17 +34,27 @@ compute_queue     : v.Queue = .null_handle,
 swapchain         : v.SwapchainKHR = .null_handle,
 
 shader            : v.ShaderModule = .null_handle,
-// frag              : v.ShaderModule = .null_handle,
+
 render_pass       : v.RenderPass = .null_handle,
 frame_buffers     : []v.Framebuffer = &.{},
 image_views       : []v.ImageView = &.{},
 
+hdr_image_mem     : v.DeviceMemory = .null_handle,
+hdr_image         : v.Image = .null_handle, 
+hdr_image_view    : v.ImageView = .null_handle, 
+hdr_render_pass   : v.RenderPass = .null_handle,
+hdr_frame_buffer  : v.Framebuffer = .null_handle,
+hdr_sampler       : v.Sampler = .null_handle,
+
 descriptor_set_layout : v.DescriptorSetLayout = .null_handle,
 pipeline_layout   : v.PipelineLayout = .null_handle,
+hdr_pipeline_layout   : v.PipelineLayout = .null_handle,
 descriptor_pool   : v.DescriptorPool = .null_handle,
 descriptor_set    : [MAX_FRAMES_IN_FLIGHT]v.DescriptorSet = .{.null_handle, .null_handle},
-graphics_pipeline : v.Pipeline = .null_handle,
-compute_pipelines  : [COMPUTE_STAGE_COUNT]v.Pipeline = .{.null_handle, .null_handle},
+
+graphics_pipeline     : v.Pipeline = .null_handle,
+hdr_graphics_pipeline : v.Pipeline = .null_handle,
+compute_pipelines     : [COMPUTE_STAGE_COUNT]v.Pipeline = .{.null_handle, .null_handle},
 
 command_pool               : v.CommandPool = .null_handle,
 graphics_command_buffers   : [MAX_FRAMES_IN_FLIGHT]v.CommandBuffer = undefined,
@@ -186,7 +197,8 @@ pub fn init_device(arena: std.mem.Allocator, window_width: u32, window_height: u
         },
     };
     const device_feature = v.PhysicalDeviceFeatures {
-};
+        .sampler_anisotropy = .true,
+    };
     const extensions: []const [*:0]const u8 = &.{
         v.extensions.khr_swapchain.name,
     };
@@ -220,6 +232,7 @@ pub fn init_device(arena: std.mem.Allocator, window_width: u32, window_height: u
     _ = try state.instance.getPhysicalDeviceSurfacePresentModesKHR(state.physical_device, state.surface, &present_mode_count, present_modes.ptr);
 
     state.format = for (formats) |format| {
+        // FIXME: hacky way to do HDR
         if (format.format == .r8g8b8a8_srgb and format.color_space == .srgb_nonlinear_khr) break format;
     } else formats[0];
     state.present_mode = for (present_modes) |present_mode| {
@@ -299,7 +312,7 @@ pub fn init_swapchain(device: Device) !v.SwapchainKHR {
     return state.swapchain;
 }
 
-pub fn init_image_views(arena: std.mem.Allocator, device: Device) ![]v.ImageView {
+pub fn init_image_views(arena: std.mem.Allocator, device: Device) !void {
     var image_count: u32 = 0;
     _ = try device.getSwapchainImagesKHR(state.swapchain, &image_count, null);
     log.info("swapchain image: {}", .{image_count});
@@ -328,7 +341,62 @@ pub fn init_image_views(arena: std.mem.Allocator, device: Device) ![]v.ImageView
         };
         state.image_views[i] = try device.createImageView(&create_info, null);
     }
-    return state.image_views;
+    state.hdr_image = try device.createImage(&.{
+           .image_type = .@"2d",
+           .format = HDR_FORMAT,
+           .extent = .{ .width = state.extent.width, .height = state.extent.height, .depth = 1 },
+           .mip_levels = 1,
+           .array_layers = 1,
+           .samples = .{ .@"1" = true },
+           .tiling = .optimal,
+           .usage = .{ .color_attachment = true, .sampled = true },
+           .sharing_mode = .exclusive,
+           .initial_layout = .@"undefined",
+    }, null);
+
+    const mem_reqs = device.getImageMemoryRequirements(state.hdr_image);
+    const mem_type = find_mem_type(mem_reqs.memory_type_bits, .{ .device_local = true });
+    state.hdr_image_mem = try device.allocateMemory(&.{
+            .allocation_size = mem_reqs.size,
+            .memory_type_index = mem_type,
+    }, null);
+    try device.bindImageMemory(state.hdr_image, state.hdr_image_mem, 0);
+    state.hdr_image_view = try device.createImageView(&.{
+        .image = state.hdr_image,
+        .view_type = .@"2d",
+        .format = HDR_FORMAT,
+        .components = .{
+            .r = .identity,
+            .g = .identity,
+            .b = .identity,
+            .a = .identity,
+        },
+        .subresource_range = .{
+            .aspect_mask = .{ .color = true },
+            .base_mip_level = 0,
+            .level_count = 1,
+            .base_array_layer = 0,
+            .layer_count = 1,
+        },
+        }, null);
+    const props = state.instance.getPhysicalDeviceProperties(state.physical_device);
+    state.hdr_sampler = try device.createSampler(&.{
+        .mag_filter = .linear,
+        .min_filter = .linear,
+        .address_mode_u = .clamp_to_edge,
+        .address_mode_v = .clamp_to_edge,
+        .address_mode_w = .clamp_to_edge,
+        .anisotropy_enable = .true,
+        .max_anisotropy = props.limits.max_sampler_anisotropy,
+        .border_color = .int_opaque_black,
+        .unnormalized_coordinates = .false,
+        .compare_enable = .false,
+        .compare_op = .always,
+        .mipmap_mode = .linear,
+        .mip_lod_bias = 0,
+        .min_lod = 0,
+        .max_lod = 0,
+    }, null);
 }
 
 pub fn cleanup() void {
@@ -351,7 +419,11 @@ pub fn cleanup() void {
     device.destroyDescriptorSetLayout(state.descriptor_set_layout, null);
     device.destroyPipelineLayout(state.pipeline_layout, null);
     device.destroyRenderPass(state.render_pass, null);
+    device.destroyRenderPass(state.hdr_render_pass, null);
     device.destroyPipeline(state.graphics_pipeline, null);
+
+    device.destroyPipelineLayout(state.hdr_pipeline_layout, null);
+    device.destroyPipeline(state.hdr_graphics_pipeline, null);
     for (state.compute_pipelines) |pipeline|
         device.destroyPipeline(pipeline, null);
 
@@ -361,7 +433,14 @@ pub fn cleanup() void {
     device.destroyShaderModule(state.shader, null);
     for (state.image_views) |image_view|
         device.destroyImageView(image_view, null);
+    device.destroyImage(state.hdr_image, null);
+    device.destroyImageView(state.hdr_image_view, null);
+    device.freeMemory(state.hdr_image_mem, null);
+    device.destroyFramebuffer(state.hdr_frame_buffer, null);
+    device.destroySampler(state.hdr_sampler, null);
+
     device.destroySwapchainKHR(state.swapchain, null);
+
     device.destroyDevice(null);
 
     instance.destroySurfaceKHR(state.surface, null);
@@ -394,7 +473,60 @@ pub fn init_shader_modules() !void {
     state.shader = try create_shader_module(@alignCast(@embedFile("shader.spv")));
 }
 
-pub fn init_render_pass(device: Device) !v.RenderPass {
+pub fn init_hdr_render_pass() !void {
+    const device = state.device;
+    const color_attachment = v.AttachmentDescription{
+        .format = HDR_FORMAT,
+        .samples = .{ .@"1" = true },
+        .load_op = .clear,
+        .store_op = .store,
+        .stencil_load_op = .dont_care,
+        .stencil_store_op = .dont_care,
+        .initial_layout = .@"undefined",
+        .final_layout = .shader_read_only_optimal,  // <-- critical
+    };
+
+    const color_ref = v.AttachmentReference{
+        .attachment = 0,
+        .layout = .color_attachment_optimal,
+    };
+
+    const subpass = v.SubpassDescription{
+        .pipeline_bind_point = .graphics,
+        .color_attachment_count = 1,
+        .p_color_attachments = @ptrCast(&color_ref),
+    };
+
+    const dependency = v.SubpassDependency{
+        .src_subpass = v.SUBPASS_EXTERNAL,
+        .dst_subpass = 0,
+        .src_stage_mask = .{ .color_attachment_output = true },
+        .src_access_mask = .{},
+        .dst_stage_mask = .{ .color_attachment_output = true },
+        .dst_access_mask = .{ .color_attachment_write = true },
+    };
+
+    const hdr_render_pass_info = v.RenderPassCreateInfo{
+        .attachment_count = 1,
+        .p_attachments = @ptrCast(&color_attachment),
+        .subpass_count = 1,
+        .p_subpasses = @ptrCast(&subpass),
+        .dependency_count = 1,
+        .p_dependencies = @ptrCast(&dependency),
+    };
+
+    state.hdr_render_pass = try device.createRenderPass(&hdr_render_pass_info, null);
+    state.hdr_frame_buffer = try device.createFramebuffer(&.{
+        .render_pass = state.hdr_render_pass,
+        .attachment_count = 1,
+        .p_attachments = @ptrCast(&state.hdr_image_view),
+        .width = state.extent.width,
+        .height = state.extent.height,
+        .layers = 1,
+    }, null);
+}
+
+pub fn init_render_pass(device: Device) !void {
     const color_attachment = v.AttachmentDescription {
         .format = state.format.format,
         .samples = .{ .@"1" = true },
@@ -436,7 +568,6 @@ pub fn init_render_pass(device: Device) !v.RenderPass {
     };
 
     state.render_pass = try device.createRenderPass(&render_pass_info, null);
-    return state.render_pass;
 }
 
 pub fn init_frame_buffers(arena: std.mem.Allocator, device: Device) !void {
@@ -474,7 +605,13 @@ pub fn init_descriptor_set(ping_pong: [MAX_FRAMES_IN_FLIGHT]v.Buffer, grid_offse
             .binding = 2,
             .descriptor_type = .storage_buffer,
             .descriptor_count = 1,
-            .stage_flags = .{ .compute = true },
+            .stage_flags = .{ .vertex  = true, .compute = true },
+        },
+        .{ // hdr texture
+            .binding = 3,
+            .descriptor_type = .combined_image_sampler,
+            .descriptor_count = 1,
+            .stage_flags = .{ .fragment = true },
         }
     };
 
@@ -498,6 +635,10 @@ pub fn init_descriptor_set(ping_pong: [MAX_FRAMES_IN_FLIGHT]v.Buffer, grid_offse
                 },
                 .{
                     .type = .storage_buffer,
+                    .descriptor_count = 2,
+                },
+                .{
+                    .type = .combined_image_sampler,
                     .descriptor_count = 2,
                 }
             },
@@ -528,21 +669,39 @@ pub fn init_descriptor_set(ping_pong: [MAX_FRAMES_IN_FLIGHT]v.Buffer, grid_offse
                     .buffer = grid_offsets,
                     .offset = 0,
                     .range = v.WHOLE_SIZE,
-                }
+                },
             };
 
-            const writes = [_]v.WriteDescriptorSet{
+            const writes = [_]v.WriteDescriptorSet {
                 .{
                     .dst_set = state.descriptor_set[i],
                     .dst_binding = 0,
                     .dst_array_element = 0,
-                    .descriptor_count = 2,
+                    .descriptor_count = 3,
                     .descriptor_type = .storage_buffer,
                     .p_buffer_info = &ssbo_info,
 
                     .p_image_info = &.{},
                     .p_texel_buffer_view = &.{},
                 },
+                .{
+                    .dst_set = state.descriptor_set[i],
+                    .dst_binding = 3,
+                    .dst_array_element = 0,
+                    .descriptor_count = 1,
+                    .descriptor_type = .combined_image_sampler,
+
+                    .p_image_info = &.{
+                        .{
+                            .image_layout = .shader_read_only_optimal,
+                            .sampler = state.hdr_sampler,
+                            .image_view = state.hdr_image_view,
+                        }
+                    },
+
+                    .p_buffer_info = &.{},
+                    .p_texel_buffer_view = &.{},
+                }
             };
 
             device.updateDescriptorSets(&writes, null);
@@ -550,11 +709,138 @@ pub fn init_descriptor_set(ping_pong: [MAX_FRAMES_IN_FLIGHT]v.Buffer, grid_offse
     }
 }
 
+
 pub fn init_pipeline(
     vert_input_stride: usize,
     vert_input_attrs: []const v.VertexInputAttributeDescription,
-    push_constant_size: usize) !v.Pipeline {
+    push_constant_size: usize) !void {
+    const vert_create_info = v.PipelineShaderStageCreateInfo {
+        .stage = .{ .vertex = true },
+        .module = state.shader,
+        .p_name = "vert_hdr",
+    };
+    const frag_create_info = v.PipelineShaderStageCreateInfo {
+        .stage = .{ .fragment = true },
+        .module = state.shader,
+        .p_name = "frag_hdr",
+    };
 
+    //
+    // Vertex Input
+    //
+    const vertex_binding_desc = v.VertexInputBindingDescription {
+        .binding    = 0,
+        .stride     = @intCast(vert_input_stride),
+        .input_rate = .vertex,
+    };
+
+    const vertex_input_state_info = v.PipelineVertexInputStateCreateInfo {
+        .vertex_binding_description_count = 1,
+        .p_vertex_binding_descriptions = &.{vertex_binding_desc},
+        .vertex_attribute_description_count = @intCast(vert_input_attrs.len),
+        .p_vertex_attribute_descriptions = vert_input_attrs.ptr,
+
+    };
+    const assembly_state_info = v.PipelineInputAssemblyStateCreateInfo {
+        .topology = .triangle_list,
+        .primitive_restart_enable = .false,
+    };
+
+    const viewport_state_info = v.PipelineViewportStateCreateInfo {
+        .viewport_count = 1,
+        .p_viewports = &.{state.viewport},
+        .scissor_count = 1,
+        .p_scissors = &.{state.scissor},
+    };
+
+    const dynamic_states: []const v.DynamicState = &.{
+        .viewport,
+        .scissor,
+    };
+
+    const dynamic_state_info = v.PipelineDynamicStateCreateInfo {
+        .dynamic_state_count = @intCast(dynamic_states.len),
+        .p_dynamic_states = dynamic_states.ptr,
+    };
+
+    const rasteriazation_state_info = v.PipelineRasterizationStateCreateInfo {
+        .depth_clamp_enable = .false,
+        .rasterizer_discard_enable = .false,
+        .polygon_mode = .fill,
+        .line_width = 1,
+        .cull_mode = .{ .back = true },
+        .front_face = .clockwise,
+
+        .depth_bias_enable = .false,
+        .depth_bias_constant_factor = 0,
+        .depth_bias_clamp = 0,
+        .depth_bias_slope_factor = 0,
+    };
+
+    const multi_sample_state_info = v.PipelineMultisampleStateCreateInfo {
+        .rasterization_samples = .{ .@"1" = true },
+        .sample_shading_enable = .false,
+        .min_sample_shading = 1,
+        .p_sample_mask = null,
+        .alpha_to_coverage_enable = .false,
+        .alpha_to_one_enable = .false,
+    };
+
+    const color_blend_attachment_info = v.PipelineColorBlendAttachmentState {
+        .blend_enable = .false, // TODO: ????
+        .src_color_blend_factor = .src_alpha,
+        .dst_color_blend_factor = .one_minus_src_alpha,
+        .color_blend_op = .@"add",
+        .src_alpha_blend_factor = .one_minus_src_alpha,
+        .dst_alpha_blend_factor = .zero,
+        .alpha_blend_op = .@"add",
+        .color_write_mask = .{ .r = true, .g = true, .b = true, .a = true },
+    };
+
+    const color_blend_info = v.PipelineColorBlendStateCreateInfo {
+        .logic_op_enable = .false,
+        .logic_op = .copy,
+        .attachment_count = 1,
+        .p_attachments = &.{color_blend_attachment_info},
+        .blend_constants = .{0,0,0,0},
+    };
+
+    const push_constant_ranges = [_]v.PushConstantRange{.{
+        .stage_flags = .{ .vertex = true, .fragment = true, .compute = true },
+        .offset = 0,
+        .size = @intCast(push_constant_size),
+    }};
+
+    state.pipeline_layout = try state.device.createPipelineLayout(&.{
+        .set_layout_count = 1,
+        .p_set_layouts = &.{state.descriptor_set_layout},
+        .push_constant_range_count = 1,
+        .p_push_constant_ranges = &push_constant_ranges,
+    }, null);
+
+
+
+    const graphics_pipeline_info = v.GraphicsPipelineCreateInfo {
+        .stage_count = 2,
+        .p_stages = &.{ vert_create_info, frag_create_info },
+        .p_vertex_input_state = &vertex_input_state_info,
+        .p_input_assembly_state = &assembly_state_info,
+        .p_viewport_state = &viewport_state_info,
+        .p_rasterization_state = &rasteriazation_state_info,
+        .p_multisample_state = &multi_sample_state_info,
+        .p_color_blend_state = &color_blend_info,
+        .p_dynamic_state = &dynamic_state_info,
+        .layout = state.pipeline_layout,
+        .render_pass = state.render_pass,
+        .subpass = 0,
+        .base_pipeline_index = -1,
+    };
+    _ = try state.device.createGraphicsPipelines(.null_handle, &.{graphics_pipeline_info}, null, @ptrCast(&state.graphics_pipeline));
+}
+
+pub fn init_hdr_pipeline(
+    vert_input_stride: usize,
+    vert_input_attrs: []const v.VertexInputAttributeDescription) !void {
     const vert_create_info = v.PipelineShaderStageCreateInfo {
         .stage = .{ .vertex = true },
         .module = state.shader,
@@ -630,10 +916,10 @@ pub fn init_pipeline(
     const color_blend_attachment_info = v.PipelineColorBlendAttachmentState {
         .blend_enable = .true,
         .src_color_blend_factor = .src_alpha,
-        .dst_color_blend_factor = .one_minus_src_alpha,
+        .dst_color_blend_factor = .one,
         .color_blend_op = .@"add",
-        .src_alpha_blend_factor = .one,
-        .dst_alpha_blend_factor = .zero,
+        .src_alpha_blend_factor = .src_alpha,
+        .dst_alpha_blend_factor = .dst_alpha,
         .alpha_blend_op = .@"add",
         .color_write_mask = .{ .r = true, .g = true, .b = true, .a = true },
     };
@@ -646,18 +932,13 @@ pub fn init_pipeline(
         .blend_constants = .{0,0,0,0},
     };
 
-    const push_constant_ranges = [_]v.PushConstantRange{.{
-        .stage_flags = .{ .vertex = true, .fragment = true, .compute = true },
-        .offset = 0,
-        .size = @intCast(push_constant_size),
-    }};
 
-    state.pipeline_layout = try state.device.createPipelineLayout(&.{
-        .set_layout_count = 1,
-        .p_set_layouts = &.{state.descriptor_set_layout},
-        .push_constant_range_count = 1,
-        .p_push_constant_ranges = &push_constant_ranges,
-    }, null);
+    // state.hdr_pipeline_layout = try state.device.createPipelineLayout(&.{
+    //     .set_layout_count = 1,
+    //     .p_set_layouts = &.{state.descriptor_set_layout},
+    //     .push_constant_range_count = 1,
+    //     .p_push_constant_ranges = &push_constant_ranges,
+    // }, null);
 
 
 
@@ -672,13 +953,11 @@ pub fn init_pipeline(
         .p_color_blend_state = &color_blend_info,
         .p_dynamic_state = &dynamic_state_info,
         .layout = state.pipeline_layout,
-        .render_pass = state.render_pass,
+        .render_pass = state.hdr_render_pass,
         .subpass = 0,
         .base_pipeline_index = -1,
     };
-    _ = try state.device.createGraphicsPipelines(.null_handle, &.{graphics_pipeline_info}, null, @ptrCast(&state.graphics_pipeline));
-
-    return state.graphics_pipeline;
+    _ = try state.device.createGraphicsPipelines(.null_handle, &.{graphics_pipeline_info}, null, @ptrCast(&state.hdr_graphics_pipeline));
 }
 
 pub fn init_compute_pipeline() !void {
@@ -843,8 +1122,16 @@ pub fn draw_frame(vertex_count: u32, vertex_buf: v.Buffer) !void {
     const curr_frame = &state.per_frame.curr_frame;
     const image_idx = try acquire_image(curr_frame.*);
 
-    try record_command_buffers(curr_frame.*, image_idx, vertex_count, vertex_buf);
-    try submit_command_buffer(curr_frame.*, image_idx);
+    try record_graphics_cmd(
+        curr_frame.*,
+        state.graphics_command_buffers[curr_frame.*],
+        state.frame_buffers[image_idx], state.graphics_pipeline, vertex_count, vertex_buf);
+
+    try record_graphics_cmd(
+        curr_frame.*,
+        state.graphics_command_buffers[curr_frame.*],
+        state.frame_buffers[image_idx], state.graphics_pipeline, vertex_count, vertex_buf);
+    try submit_graphics_cmd(state.graphics_command_buffers[curr_frame.*], curr_frame.*, image_idx);
     curr_frame.* = (curr_frame.* + 1) % MAX_FRAMES_IN_FLIGHT;
     state.frame_counter += 1;
 }
@@ -858,47 +1145,82 @@ pub fn acquire_image(curr_frame: u32) !u32 {
     return next_result.image_index;
 }
 
-pub fn record_command_buffers(
-    curr_frame: u32, image_idx: u32,
+pub fn record_graphics_cmd(
+    curr_frame: u32,
+    command_buffer: v.CommandBuffer,
+    frame_buffer: v.Framebuffer, pipeline: v.Pipeline,
     vertex_count: u32, vertex_buf: v.Buffer) !void {
     const device = state.device;
-    const command_buffer = state.graphics_command_buffers[curr_frame];
 
     try device.resetCommandBuffer(command_buffer, .{});
     try device.beginCommandBuffer(command_buffer, &.{});
-    device.cmdBeginRenderPass(command_buffer, &.{
-        .render_pass = state.render_pass,
-        .framebuffer = state.frame_buffers[image_idx],
-        .render_area = .{
-            .offset = .{.x=0,.y=0},
-            .extent = state.extent,
-        },
-        .clear_value_count = 1,
-        .p_clear_values = &.{
-            .{
-                .color = .{ .float_32 = .{0,0,0,1} },
-            }
-        },
-        }, .@"inline");
 
-    device.cmdBindPipeline(command_buffer, .graphics, state.graphics_pipeline);
+    {
+        // Render particles system to a HDR texture
+        device.cmdBeginRenderPass(command_buffer, &.{
+            .render_pass = state.hdr_render_pass, .framebuffer = state.hdr_frame_buffer,
+            .render_area = .{
+                .offset = .{.x=0,.y=0},
+                .extent = state.extent,
+            },
+            .clear_value_count = 1,
+            .p_clear_values = &.{
+                .{
+                    .color = .{ .float_32 = .{0,0,0,1} },
+                }
+            },
+            }, .@"inline");
+        device.cmdBindPipeline(command_buffer, .graphics, state.hdr_graphics_pipeline);
+        device.cmdSetViewport(command_buffer, 0, &.{state.viewport});
+        device.cmdSetScissor(command_buffer, 0, &.{state.scissor});
 
-    device.cmdSetViewport(command_buffer, 0, &.{state.viewport});
-    device.cmdSetScissor(command_buffer, 0, &.{state.scissor});
+        if (state.per_frame.push_constant_size > 0)
+            device.cmdPushConstants(command_buffer, state.pipeline_layout, .{ .vertex = true, .fragment = true, .compute = true }, 0,
+                state.per_frame.push_constant_size, state.per_frame.push_constant);
 
-    if (state.per_frame.push_constant_size > 0)
-    device.cmdPushConstants(command_buffer, state.pipeline_layout, .{ .vertex = true, .fragment = true, .compute = true }, 0,
-        state.per_frame.push_constant_size, state.per_frame.push_constant);
+        device.cmdBindDescriptorSets(command_buffer,
+            .graphics, state.pipeline_layout, 0, &.{ state.descriptor_set[curr_frame] }, null);
+        device.cmdBindVertexBuffers(command_buffer, 0, &.{vertex_buf}, &.{0});
+        device.cmdDraw(command_buffer, vertex_count, 1, 0, 0);
 
-    device.cmdBindDescriptorSets(command_buffer,
-        .graphics, state.pipeline_layout, 0, &.{ state.descriptor_set[curr_frame] }, null);
-    device.cmdBindVertexBuffers(command_buffer, 0, &.{vertex_buf}, &.{0});
-    device.cmdDraw(command_buffer, vertex_count, 1, 0, 0);
-    device.cmdEndRenderPass(command_buffer);
+        device.cmdEndRenderPass(command_buffer);
+    }
+    {
+        // Render HDR texture to screen
+        device.cmdBeginRenderPass(command_buffer, &.{
+            .render_pass = state.render_pass, .framebuffer = frame_buffer,
+            .render_area = .{
+                .offset = .{.x=0,.y=0},
+                .extent = state.extent,
+            },
+            .clear_value_count = 1,
+            .p_clear_values = &.{
+                .{
+                    .color = .{ .float_32 = .{0,0,0,1} },
+                }
+            },
+            }, .@"inline");
+
+        device.cmdBindPipeline(command_buffer, .graphics, pipeline);
+
+        device.cmdSetViewport(command_buffer, 0, &.{state.viewport});
+        device.cmdSetScissor(command_buffer, 0, &.{state.scissor});
+
+        if (state.per_frame.push_constant_size > 0)
+            device.cmdPushConstants(command_buffer, state.pipeline_layout, .{ .vertex = true, .fragment = true, .compute = true }, 0,
+                state.per_frame.push_constant_size, state.per_frame.push_constant);
+
+        device.cmdBindDescriptorSets(command_buffer,
+            .graphics, state.pipeline_layout, 0, &.{ state.descriptor_set[curr_frame] }, null);
+        // device.cmdBindVertexBuffers(command_buffer, 0, &.{vertex_buf}, &.{0});
+        device.cmdDraw(command_buffer, 6, 1, 0, 0);
+        device.cmdEndRenderPass(command_buffer);
+    }
+
     try device.endCommandBuffer(command_buffer);
 }
 
-pub fn submit_command_buffer(curr_frame: u32, image_idx: u32) !void {
+pub fn submit_graphics_cmd(curr_command_buffer: v.CommandBuffer, curr_frame: u32, image_idx: u32) !void {
     const device = state.device;
     const wait_semas: []const v.Semaphore = &.{
         state.compute_finished_semas[COMPUTE_STAGE_COUNT-1], // waits on the last computaion
@@ -907,13 +1229,12 @@ pub fn submit_command_buffer(curr_frame: u32, image_idx: u32) !void {
     const signal_semas: []const v.Semaphore = &.{
         state.render_finished_semas[curr_frame],
     };
-    const curr_command_buffers = state.graphics_command_buffers[curr_frame..curr_frame+1];
     try device.queueSubmit(state.graphics_queue, &.{.{
         .wait_semaphore_count = @intCast(wait_semas.len),
         .p_wait_semaphores = wait_semas.ptr,
         .p_wait_dst_stage_mask = &.{ .{ .vertex_input = true }, .{ .color_attachment_output = true } },
-        .command_buffer_count = @intCast(curr_command_buffers.len),
-        .p_command_buffers = curr_command_buffers.ptr,
+        .command_buffer_count = 1,
+        .p_command_buffers = &.{curr_command_buffer},
         .signal_semaphore_count = @intCast(signal_semas.len),
         .p_signal_semaphores = signal_semas.ptr,
     }}, state.in_flight_fences[curr_frame]);

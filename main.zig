@@ -108,7 +108,7 @@ pub fn main(init: std.process.Init) !void {
 
     var   particles  : [40000]Particle = undefined;
     var   species    : [MAX_PARTICLE_SPECIE]Particle_Specie = undefined;
-    const specie_ct  : u32 = 4;
+    const specie_ct  : u32 = 2;
     var   particle_force_configs : [MAX_PARTICLE_SPECIE*MAX_PARTICLE_SPECIE]Force_Config = undefined;
     const collision_cfg = Force_Config {
         .radius = 0.025,
@@ -141,7 +141,8 @@ pub fn main(init: std.process.Init) !void {
     _ = try vulkan.init_swapchain(device);
     _ = try vulkan.init_image_views(arena, device);
     try vulkan.init_shader_modules();
-    _ = try vulkan.init_render_pass(device);
+    try vulkan.init_render_pass(device);
+    try vulkan.init_hdr_render_pass();
 
     _ = try vulkan.init_command_pool(device);
     const part_buf1 = try vulkan.create_storage_buffer(particles_size, true);
@@ -162,7 +163,8 @@ pub fn main(init: std.process.Init) !void {
     try vulkan.copy_buffer(part_buf2, staging_buf, particles_size);
 
     try vulkan.init_descriptor_set(.{part_buf1.buf, part_buf2.buf}, grid_offsets_buf.buf);
-    _ = try vulkan.init_pipeline(@sizeOf(Particle), &Particle.get_input_attrs(0), @sizeOf(Push_Constant));
+    try vulkan.init_pipeline(@sizeOf(Particle), &Particle.get_input_attrs(0), @sizeOf(Push_Constant));
+    try vulkan.init_hdr_pipeline(@sizeOf(Particle), &Particle.get_input_attrs(0));
     try vulkan.init_compute_pipeline();
     _ = try vulkan.init_frame_buffers(arena, device);
 

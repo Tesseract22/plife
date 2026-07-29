@@ -59,6 +59,20 @@ pub const Vertex = struct {
         frag_pos.* = pos_offset;
         frag_color.* = constant.species[particle.specie].color;
     }
+
+    fn hdr() callconv(.spirv_vertex) void {
+        const tex_coord = @extern(*addrspace(.output) V2, .{
+            .name = "tex_coord",
+            .decoration = .{ .location = 0 },
+        });
+
+        const i = spirv.vertex_index;
+        tex_coord.* = positions[i] + splat2(0.5);
+        const pos_offset = positions[i] * splat2(2);
+        spirv.position_out.* = .{
+            pos_offset[0], pos_offset[1], 0, 1
+        };
+    }
 };
 
 const Fragment = struct {
@@ -74,12 +88,12 @@ const Fragment = struct {
         .name = "center",
         .decoration = .{ .location = 2 },
     });
-
+    
     const out_color = @extern(*addrspace(.output) V4, .{
         .name = "out_color",
         .decoration = .{ .location = 0 },
     });
-
+    
     fn main() callconv(.{ .spirv_fragment = .{ .depth_assumption = .greater } }) void {
         const constant = @extern(*addrspace(.push_constant) driver.Push_Constant, .{.name = "push_constant"}).*;
         const d = len(frag_pos.*-center.*);
@@ -100,6 +114,58 @@ const Fragment = struct {
             frag_color[2],
             alpha,
         };
+        // out_color.* = .{
+        //     0,1,1,1
+        // };
+    }
+
+    const sampled_image = @extern(
+        *addrspace(.constant) const SampledImage,
+        .{
+            .name = "sampled_image",
+            .decoration = .{
+                .descriptor = .{
+                    .set = 0,
+                    .binding = 3,
+                },
+                },
+            },
+            );
+
+    fn simple_tm(hdrColor: V3) V3 {
+        return hdrColor / (hdrColor + splat3(1.0));
+    }
+
+    // adapted from https://knarkowicz.wordpress.com/2016/01/06/aces-filmic-tone-mapping-curve/
+    fn aces_tm(x: V3) V3 {
+        const a = splat3(2.51);
+        const b = splat3(0.03);
+        const c = splat3(2.43);
+        const d = splat3(0.59);
+        const e = splat3(0.14);
+        return std.math.clamp((x*(a*x+b))/(x*(c*x+d)+e), 0.0, 1.0);
+    }
+
+    fn exposure_tm(hdrColor: V3) V3 {
+        const exposure = splat3(0.5);
+        return splat3(1.0) - @exp(-hdrColor * exposure);
+    }
+
+
+    fn hdr() callconv(.{ .spirv_fragment = .{ .depth_assumption = .greater } }) void {
+        const tex_coord = @extern(*addrspace(.input) V2, .{
+            .name = "tex_coord",
+            .decoration = .{ .location = 0 },
+        }).*;
+
+        const hdr_color_a = spirv.imageSampleImplicitLod(sampled_image, tex_coord);
+        const hdr_color = V3 {hdr_color_a[0], hdr_color_a[1], hdr_color_a[2]};
+        var mapped = simple_tm(hdr_color);
+        // const gamma = 2.2;
+        // inline for (0..3) |i|
+        //     mapped[i] = std.math.pow(f32, mapped[i], 1.0 / gamma);
+        if (mapped[0] > 1) mapped[0] = 0;
+        out_color.* = .{mapped[0],mapped[1],mapped[2], hdr_color_a[3]};
     }
 };
 
@@ -185,12 +251,7 @@ pub const Compute = struct {
                 }
             },
             .wrap => {
-                if (pos[0] > 1 or pos[0] < -1) {
-                    pos[0] = std.math.clamp(-pos[0], -1, 1);
-                }
-                if (pos[1] > 1 or pos[1] < -1) {
-                    pos[1] = std.math.clamp(-pos[1], -1, 1);
-                }
+                pos = @mod(pos + splat2(1), splat2(2)) - splat2(1);
             },
         }
         particles_out.ptr[i].spd = spd;
@@ -214,18 +275,20 @@ pub const Compute = struct {
     }
 
     pub fn compute_grid_offsets() callconv(.{ .spirv_kernel = .{.x=driver.KERNEL_WORKGROUP_X,.y=1,.z=1}}) void {
-        const i = spirv.global_invocation_id[0];
-        const particle = particles_in.ptr[i];
-        const cell = cell_from_pos(particle.pos);
-        const bin = bin_from_cell(cell);
+        // const i = spirv.global_invocation_id[0];
+        // const particle = particles_in.ptr[i];
+        // const cell = cell_from_pos(particle.pos);
+        // const bin = bin_from_cell(cell);
 
-        _ = @atomicRmw(u32, &grid_offsets.ptr[bin], .Add, 1, .monotonic);
+        // _ = @atomicRmw(u32, &grid_offsets.ptr[bin], .Add, 1, .monotonic);
     }
 };
 
 comptime {
     @export(&Vertex.main,   .{ .name = "vert" });
+    @export(&Vertex.hdr,   .{ .name = "vert_hdr" });
     @export(&Fragment.main, .{ .name = "frag" });
+    @export(&Fragment.hdr, .{ .name = "frag_hdr" });
     @export(&Compute.main,  .{ .name = "compute" });
     @export(&Compute.compute_grid_offsets, .{ .name = "compute_grid_offsets"});
 }
@@ -246,6 +309,18 @@ fn SpirvArray(comptime T: type) type {
         ptr: @SpirvType(.{ .runtime_array = T }),
     };
 }
+pub const Image = @SpirvType(.{ .image = .{
+        .usage = .{ .sampled = f32 },
+        .format = .rgba16f,
+        .dim = .@"2d",
+        .depth = .not_depth,
+        .arrayed = false,
+        .multisampled = false,
+        .access = .unknown,
+    } });
+pub const SampledImage = @SpirvType(.{ .sampled_image = Image });
+
+
 const Particle_Array = SpirvArray(driver.Particle);
 const U32_Array      = SpirvArray(u32);
 
@@ -262,5 +337,9 @@ pub fn len2(a: V2) f32 {
 }
 
 pub fn splat2(a: f32) V2 {
+    return @splat(a);
+}
+
+pub fn splat3(a: f32) V3 {
     return @splat(a);
 }
