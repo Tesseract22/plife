@@ -1,7 +1,7 @@
 const Vulkan = @This();
 const HDR_FORMAT = v.Format.r16g16b16a16_sfloat;
 pub const MAX_FRAMES_IN_FLIGHT = 2;
-pub const COMPUTE_STAGE_COUNT  = 2;
+pub const COMPUTE_STAGE_COUNT  = 1;
 vkb: v.BaseWrapper = undefined,
 instance_handle   : v.Instance = .null_handle,
 instance_wrapper  : v.InstanceWrapper = undefined,
@@ -40,8 +40,8 @@ frame_buffers     : []v.Framebuffer = &.{},
 image_views       : []v.ImageView = &.{},
 
 hdr_image_mem     : v.DeviceMemory = .null_handle,
-hdr_image         : v.Image = .null_handle, 
-hdr_image_view    : v.ImageView = .null_handle, 
+hdr_image         : v.Image = .null_handle,
+hdr_image_view    : v.ImageView = .null_handle,
 hdr_render_pass   : v.RenderPass = .null_handle,
 hdr_frame_buffer  : v.Framebuffer = .null_handle,
 hdr_sampler       : v.Sampler = .null_handle,
@@ -54,7 +54,7 @@ descriptor_set    : [MAX_FRAMES_IN_FLIGHT]v.DescriptorSet = .{.null_handle, .nul
 
 graphics_pipeline     : v.Pipeline = .null_handle,
 hdr_graphics_pipeline : v.Pipeline = .null_handle,
-compute_pipelines     : [COMPUTE_STAGE_COUNT]v.Pipeline = .{.null_handle, .null_handle},
+compute_pipelines     : [COMPUTE_STAGE_COUNT]v.Pipeline = .{.null_handle},
 
 command_pool               : v.CommandPool = .null_handle,
 graphics_command_buffers   : [MAX_FRAMES_IN_FLIGHT]v.CommandBuffer = undefined,
@@ -473,17 +473,26 @@ pub fn init_shader_modules() !void {
     state.shader = try create_shader_module(@alignCast(@embedFile("shader.spv")));
 }
 
-pub fn init_hdr_render_pass() !void {
+pub const Render_Pass_Options = struct {
+    format: v.Format,
+    off_screen: bool = false,
+};
+
+pub fn create_render_pass(opts: Render_Pass_Options) !v.RenderPass {
     const device = state.device;
     const color_attachment = v.AttachmentDescription{
-        .format = HDR_FORMAT,
+        .format = opts.format,
         .samples = .{ .@"1" = true },
         .load_op = .clear,
         .store_op = .store,
         .stencil_load_op = .dont_care,
         .stencil_store_op = .dont_care,
         .initial_layout = .@"undefined",
-        .final_layout = .shader_read_only_optimal,  // <-- critical
+        .final_layout =
+            if (opts.off_screen)
+                .shader_read_only_optimal
+            else
+                .present_src_khr
     };
 
     const color_ref = v.AttachmentReference{
@@ -506,7 +515,7 @@ pub fn init_hdr_render_pass() !void {
         .dst_access_mask = .{ .color_attachment_write = true },
     };
 
-    const hdr_render_pass_info = v.RenderPassCreateInfo{
+    const render_pass_info = v.RenderPassCreateInfo{
         .attachment_count = 1,
         .p_attachments = @ptrCast(&color_attachment),
         .subpass_count = 1,
@@ -515,8 +524,15 @@ pub fn init_hdr_render_pass() !void {
         .p_dependencies = @ptrCast(&dependency),
     };
 
-    state.hdr_render_pass = try device.createRenderPass(&hdr_render_pass_info, null);
-    state.hdr_frame_buffer = try device.createFramebuffer(&.{
+    return device.createRenderPass(&render_pass_info, null);
+}
+
+pub fn init_hdr_render_pass() !void {
+    state.hdr_render_pass = try create_render_pass(.{
+        .format = HDR_FORMAT,
+        .off_screen = true,
+    });
+    state.hdr_frame_buffer = try state.device.createFramebuffer(&.{
         .render_pass = state.hdr_render_pass,
         .attachment_count = 1,
         .p_attachments = @ptrCast(&state.hdr_image_view),
@@ -526,48 +542,11 @@ pub fn init_hdr_render_pass() !void {
     }, null);
 }
 
-pub fn init_render_pass(device: Device) !void {
-    const color_attachment = v.AttachmentDescription {
-        .format = state.format.format,
-        .samples = .{ .@"1" = true },
-        .load_op = .clear,
-        .store_op = .store,
-        .stencil_load_op = .dont_care,
-        .stencil_store_op = .dont_care,
-        .initial_layout = .@"undefined",
-        .final_layout = .present_src_khr,
-    };
-
-    const color_attachment_ref = v.AttachmentReference {
-        .attachment = 0,
-        .layout = .color_attachment_optimal,
-    };
-
-    const subpass = v.SubpassDescription {
-        .pipeline_bind_point = .graphics,
-        .color_attachment_count = 1,
-        .p_color_attachments = @ptrCast(&color_attachment_ref),
-    };
-
-    const subpass_dep = v.SubpassDependency {
-        .src_subpass = v.SUBPASS_EXTERNAL,
-        .dst_subpass = 0,
-        .src_stage_mask = .{ .color_attachment_output = true },
-        .src_access_mask = .{},
-        .dst_stage_mask = .{ .color_attachment_output = true },
-        .dst_access_mask = .{ .color_attachment_write = true },
-    };
-
-    const render_pass_info = v.RenderPassCreateInfo {
-        .attachment_count = 1,
-        .p_attachments = @ptrCast(&color_attachment),
-        .subpass_count = 1,
-        .p_subpasses = @ptrCast(&subpass),
-        .dependency_count = 1,
-        .p_dependencies = &.{subpass_dep},
-    };
-
-    state.render_pass = try device.createRenderPass(&render_pass_info, null);
+pub fn init_render_pass() !void {
+    state.render_pass = try create_render_pass(.{
+        .off_screen = false,
+        .format     = state.format.format,
+    });
 }
 
 pub fn init_frame_buffers(arena: std.mem.Allocator, device: Device) !void {
@@ -709,147 +688,44 @@ pub fn init_descriptor_set(ping_pong: [MAX_FRAMES_IN_FLIGHT]v.Buffer, grid_offse
     }
 }
 
-
-pub fn init_pipeline(
-    vert_input_stride: usize,
-    vert_input_attrs: []const v.VertexInputAttributeDescription,
-    push_constant_size: usize) !void {
-    const vert_create_info = v.PipelineShaderStageCreateInfo {
-        .stage = .{ .vertex = true },
-        .module = state.shader,
-        .p_name = "vert_hdr",
-    };
-    const frag_create_info = v.PipelineShaderStageCreateInfo {
-        .stage = .{ .fragment = true },
-        .module = state.shader,
-        .p_name = "frag_hdr",
-    };
-
-    //
-    // Vertex Input
-    //
-    const vertex_binding_desc = v.VertexInputBindingDescription {
-        .binding    = 0,
-        .stride     = @intCast(vert_input_stride),
-        .input_rate = .vertex,
-    };
-
-    const vertex_input_state_info = v.PipelineVertexInputStateCreateInfo {
-        .vertex_binding_description_count = 1,
-        .p_vertex_binding_descriptions = &.{vertex_binding_desc},
-        .vertex_attribute_description_count = @intCast(vert_input_attrs.len),
-        .p_vertex_attribute_descriptions = vert_input_attrs.ptr,
-
-    };
-    const assembly_state_info = v.PipelineInputAssemblyStateCreateInfo {
-        .topology = .triangle_list,
-        .primitive_restart_enable = .false,
-    };
-
-    const viewport_state_info = v.PipelineViewportStateCreateInfo {
-        .viewport_count = 1,
-        .p_viewports = &.{state.viewport},
-        .scissor_count = 1,
-        .p_scissors = &.{state.scissor},
-    };
-
-    const dynamic_states: []const v.DynamicState = &.{
-        .viewport,
-        .scissor,
-    };
-
-    const dynamic_state_info = v.PipelineDynamicStateCreateInfo {
-        .dynamic_state_count = @intCast(dynamic_states.len),
-        .p_dynamic_states = dynamic_states.ptr,
-    };
-
-    const rasteriazation_state_info = v.PipelineRasterizationStateCreateInfo {
-        .depth_clamp_enable = .false,
-        .rasterizer_discard_enable = .false,
-        .polygon_mode = .fill,
-        .line_width = 1,
-        .cull_mode = .{ .back = true },
-        .front_face = .clockwise,
-
-        .depth_bias_enable = .false,
-        .depth_bias_constant_factor = 0,
-        .depth_bias_clamp = 0,
-        .depth_bias_slope_factor = 0,
-    };
-
-    const multi_sample_state_info = v.PipelineMultisampleStateCreateInfo {
-        .rasterization_samples = .{ .@"1" = true },
-        .sample_shading_enable = .false,
-        .min_sample_shading = 1,
-        .p_sample_mask = null,
-        .alpha_to_coverage_enable = .false,
-        .alpha_to_one_enable = .false,
-    };
-
-    const color_blend_attachment_info = v.PipelineColorBlendAttachmentState {
-        .blend_enable = .false, // TODO: ????
-        .src_color_blend_factor = .src_alpha,
-        .dst_color_blend_factor = .one_minus_src_alpha,
-        .color_blend_op = .@"add",
-        .src_alpha_blend_factor = .one_minus_src_alpha,
-        .dst_alpha_blend_factor = .zero,
-        .alpha_blend_op = .@"add",
-        .color_write_mask = .{ .r = true, .g = true, .b = true, .a = true },
-    };
-
-    const color_blend_info = v.PipelineColorBlendStateCreateInfo {
-        .logic_op_enable = .false,
-        .logic_op = .copy,
-        .attachment_count = 1,
-        .p_attachments = &.{color_blend_attachment_info},
-        .blend_constants = .{0,0,0,0},
-    };
-
-    const push_constant_ranges = [_]v.PushConstantRange{.{
-        .stage_flags = .{ .vertex = true, .fragment = true, .compute = true },
-        .offset = 0,
-        .size = @intCast(push_constant_size),
-    }};
-
+pub fn init_pipeline_layout(push_constant_size: usize) !void {
     state.pipeline_layout = try state.device.createPipelineLayout(&.{
         .set_layout_count = 1,
         .p_set_layouts = &.{state.descriptor_set_layout},
         .push_constant_range_count = 1,
-        .p_push_constant_ranges = &push_constant_ranges,
+        .p_push_constant_ranges =
+            if (push_constant_size > 0) &.{ .{
+                .stage_flags = .{ .vertex = true, .fragment = true, .compute = true },
+                .offset = 0,
+                .size = @intCast(push_constant_size),
+            }} else &.{}
     }, null);
-
-
-
-    const graphics_pipeline_info = v.GraphicsPipelineCreateInfo {
-        .stage_count = 2,
-        .p_stages = &.{ vert_create_info, frag_create_info },
-        .p_vertex_input_state = &vertex_input_state_info,
-        .p_input_assembly_state = &assembly_state_info,
-        .p_viewport_state = &viewport_state_info,
-        .p_rasterization_state = &rasteriazation_state_info,
-        .p_multisample_state = &multi_sample_state_info,
-        .p_color_blend_state = &color_blend_info,
-        .p_dynamic_state = &dynamic_state_info,
-        .layout = state.pipeline_layout,
-        .render_pass = state.render_pass,
-        .subpass = 0,
-        .base_pipeline_index = -1,
-    };
-    _ = try state.device.createGraphicsPipelines(.null_handle, &.{graphics_pipeline_info}, null, @ptrCast(&state.graphics_pipeline));
 }
 
-pub fn init_hdr_pipeline(
-    vert_input_stride: usize,
-    vert_input_attrs: []const v.VertexInputAttributeDescription) !void {
+pub const Blend_Mode = enum {
+    normal,
+    additive,
+};
+
+pub const Pipeline_Options = struct {
+    vert_shader_name: [:0]const u8,
+    frag_shader_name: [:0]const u8,
+    vert_input_stride: usize = 0,
+    vert_input_attrs: []const v.VertexInputAttributeDescription = &.{},
+    blend_mode: Blend_Mode = .normal,
+    render_pass: v.RenderPass,
+};
+
+fn create_pipeline(opts: Pipeline_Options) !v.Pipeline {
     const vert_create_info = v.PipelineShaderStageCreateInfo {
         .stage = .{ .vertex = true },
         .module = state.shader,
-        .p_name = "vert",
+        .p_name = opts.vert_shader_name,
     };
     const frag_create_info = v.PipelineShaderStageCreateInfo {
         .stage = .{ .fragment = true },
         .module = state.shader,
-        .p_name = "frag",
+        .p_name = opts.frag_shader_name,
     };
 
     //
@@ -857,15 +733,15 @@ pub fn init_hdr_pipeline(
     //
     const vertex_binding_desc = v.VertexInputBindingDescription {
         .binding    = 0,
-        .stride     = @intCast(vert_input_stride),
+        .stride     = @intCast(opts.vert_input_stride),
         .input_rate = .vertex,
     };
 
     const vertex_input_state_info = v.PipelineVertexInputStateCreateInfo {
         .vertex_binding_description_count = 1,
         .p_vertex_binding_descriptions = &.{vertex_binding_desc},
-        .vertex_attribute_description_count = @intCast(vert_input_attrs.len),
-        .p_vertex_attribute_descriptions = vert_input_attrs.ptr,
+        .vertex_attribute_description_count = @intCast(opts.vert_input_attrs.len),
+        .p_vertex_attribute_descriptions = opts.vert_input_attrs.ptr,
 
     };
     const assembly_state_info = v.PipelineInputAssemblyStateCreateInfo {
@@ -913,15 +789,27 @@ pub fn init_hdr_pipeline(
         .alpha_to_one_enable = .false,
     };
 
-    const color_blend_attachment_info = v.PipelineColorBlendAttachmentState {
-        .blend_enable = .true,
-        .src_color_blend_factor = .src_alpha,
-        .dst_color_blend_factor = .one,
-        .color_blend_op = .@"add",
-        .src_alpha_blend_factor = .src_alpha,
-        .dst_alpha_blend_factor = .dst_alpha,
-        .alpha_blend_op = .@"add",
-        .color_write_mask = .{ .r = true, .g = true, .b = true, .a = true },
+    const color_blend_attachment_info = switch (opts.blend_mode) {
+        .normal => v.PipelineColorBlendAttachmentState {
+            .blend_enable = .false, // TODO: ????
+            .src_color_blend_factor = .src_alpha,
+            .dst_color_blend_factor = .one_minus_src_alpha,
+            .color_blend_op = .@"add",
+            .src_alpha_blend_factor = .one_minus_src_alpha,
+            .dst_alpha_blend_factor = .zero,
+            .alpha_blend_op = .@"add",
+            .color_write_mask = .{ .r = true, .g = true, .b = true, .a = true },
+        },
+        .additive => v.PipelineColorBlendAttachmentState {
+            .blend_enable = .true,
+            .src_color_blend_factor = .src_alpha,
+            .dst_color_blend_factor = .one,
+            .color_blend_op = .@"add",
+            .src_alpha_blend_factor = .src_alpha,
+            .dst_alpha_blend_factor = .dst_alpha,
+            .alpha_blend_op = .@"add",
+            .color_write_mask = .{ .r = true, .g = true, .b = true, .a = true },
+        }
     };
 
     const color_blend_info = v.PipelineColorBlendStateCreateInfo {
@@ -931,16 +819,6 @@ pub fn init_hdr_pipeline(
         .p_attachments = &.{color_blend_attachment_info},
         .blend_constants = .{0,0,0,0},
     };
-
-
-    // state.hdr_pipeline_layout = try state.device.createPipelineLayout(&.{
-    //     .set_layout_count = 1,
-    //     .p_set_layouts = &.{state.descriptor_set_layout},
-    //     .push_constant_range_count = 1,
-    //     .p_push_constant_ranges = &push_constant_ranges,
-    // }, null);
-
-
 
     const graphics_pipeline_info = v.GraphicsPipelineCreateInfo {
         .stage_count = 2,
@@ -953,22 +831,45 @@ pub fn init_hdr_pipeline(
         .p_color_blend_state = &color_blend_info,
         .p_dynamic_state = &dynamic_state_info,
         .layout = state.pipeline_layout,
-        .render_pass = state.hdr_render_pass,
+        .render_pass = opts.render_pass,
         .subpass = 0,
         .base_pipeline_index = -1,
     };
-    _ = try state.device.createGraphicsPipelines(.null_handle, &.{graphics_pipeline_info}, null, @ptrCast(&state.hdr_graphics_pipeline));
+    var pipeline: v.Pipeline = .null_handle;
+    _ = try state.device.createGraphicsPipelines(.null_handle, &.{graphics_pipeline_info}, null, @ptrCast(&pipeline));
+    return pipeline;
+}
+
+pub fn init_pipeline(
+    vert_input_stride: usize,
+    vert_input_attrs: []const v.VertexInputAttributeDescription) !void {
+    state.graphics_pipeline = try create_pipeline(.{
+        .vert_shader_name  = "vert_hdr",
+        .frag_shader_name  = "frag_hdr",
+        .vert_input_stride = vert_input_stride,
+        .vert_input_attrs  = vert_input_attrs,
+        .render_pass       = state.render_pass,
+    });
+}
+
+pub fn init_hdr_pipeline() !void {
+    state.hdr_graphics_pipeline = try create_pipeline(.{
+        .vert_shader_name = "vert",
+        .frag_shader_name = "frag",
+        .blend_mode = .additive,
+        .render_pass = state.hdr_render_pass
+    });
 }
 
 pub fn init_compute_pipeline() !void {
     const device = state.device;
 
     const compute_shader_infos = [COMPUTE_STAGE_COUNT]v.PipelineShaderStageCreateInfo {
-        .{
-            .stage = .{ .compute = true },
-            .module = state.shader,
-            .p_name = "compute_grid_offsets",
-        },
+        // .{
+        //     .stage = .{ .compute = true },
+        //     .module = state.shader,
+        //     .p_name = "compute_grid_offsets",
+        // },
         .{
             .stage = .{ .compute = true },
             .module = state.shader,
@@ -976,14 +877,14 @@ pub fn init_compute_pipeline() !void {
         }
     };
     const create_infos = [COMPUTE_STAGE_COUNT]v.ComputePipelineCreateInfo {
+        // .{
+        //     .layout = state.pipeline_layout,
+        //     .stage  = compute_shader_infos[0],
+        //     .base_pipeline_index = -1,
+        // },
         .{
             .layout = state.pipeline_layout,
             .stage  = compute_shader_infos[0],
-            .base_pipeline_index = -1,
-        },
-        .{
-            .layout = state.pipeline_layout,
-            .stage  = compute_shader_infos[1],
             .base_pipeline_index = -1,
         }
     };
