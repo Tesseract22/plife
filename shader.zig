@@ -2,22 +2,13 @@ pub const PARTICLE_SIZE = 0.05;
 pub const PARTICLE_KERNEL_SIZE = 0.01;
 pub const Vertex = struct {
     const positions = [driver.VERT_PER_PARTICLE]V2 {
-        .{-0.5, -0.5}, 
+        .{-0.5, -0.5},
         .{0.5, 0.5},
         .{-0.5, 0.5},
-        .{-0.5, -0.5}, 
+        .{-0.5, -0.5},
         .{0.5, -0.5},
         .{0.5, 0.5}
     };
-
-    // const pos = @extern(*addrspace(.input) V2, .{
-    //     .name = "pos",
-    //     .decoration = .{ .location = 0 },
-    // });
-    // const color = @extern(*addrspace(.input) V3, .{
-    //     .name = "color",
-    //     .decoration = .{ .location = 1 },
-    // });
 
     const constant = @extern(*addrspace(.push_constant) driver.Push_Constant, .{.name = "push_constant"});
     const particles1 = @extern(*addrspace(.storage_buffer) const Particle_Array , .{
@@ -61,14 +52,27 @@ pub const Vertex = struct {
     }
 
     fn hdr() callconv(.spirv_vertex) void {
+        const pos = @extern(*addrspace(.input) V2, .{
+            .name = "pos",
+            .decoration = .{ .location = 0 },
+        }).*;
+        const color = @extern(*addrspace(.input) V4, .{
+            .name = "color",
+            .decoration = .{ .location = 1 },
+        }).*;
+        const in_tex_coord = @extern(*addrspace(.input) V2, .{
+            .name = "in_tex_coord",
+            .decoration = .{ .location = 2 },
+        }).*;
+
         const tex_coord = @extern(*addrspace(.output) V2, .{
             .name = "tex_coord",
             .decoration = .{ .location = 0 },
         });
+        _ = color;
 
-        const i = spirv.vertex_index;
-        tex_coord.* = positions[i] + splat2(0.5);
-        const pos_offset = positions[i] * splat2(2);
+        tex_coord.* = in_tex_coord;
+        const pos_offset = pos;
         spirv.position_out.* = .{
             pos_offset[0], pos_offset[1], 0, 1
         };
@@ -88,12 +92,12 @@ const Fragment = struct {
         .name = "center",
         .decoration = .{ .location = 2 },
     });
-    
+
     const out_color = @extern(*addrspace(.output) V4, .{
         .name = "out_color",
         .decoration = .{ .location = 0 },
     });
-    
+
     fn main() callconv(.{ .spirv_fragment = .{ .depth_assumption = .greater } }) void {
         const constant = @extern(*addrspace(.push_constant) driver.Push_Constant, .{.name = "push_constant"}).*;
         const d = len(frag_pos.*-center.*);

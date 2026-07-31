@@ -42,18 +42,19 @@ image_views       : []v.ImageView = &.{},
 hdr_image_mem     : v.DeviceMemory = .null_handle,
 hdr_image         : v.Image = .null_handle,
 hdr_image_view    : v.ImageView = .null_handle,
-hdr_render_pass   : v.RenderPass = .null_handle,
+off_screen_render_pass   : v.RenderPass = .null_handle,
 hdr_frame_buffer  : v.Framebuffer = .null_handle,
 hdr_sampler       : v.Sampler = .null_handle,
 
 descriptor_set_layout : v.DescriptorSetLayout = .null_handle,
 pipeline_layout   : v.PipelineLayout = .null_handle,
-hdr_pipeline_layout   : v.PipelineLayout = .null_handle,
 descriptor_pool   : v.DescriptorPool = .null_handle,
 descriptor_set    : [MAX_FRAMES_IN_FLIGHT]v.DescriptorSet = .{.null_handle, .null_handle},
 
 graphics_pipeline     : v.Pipeline = .null_handle,
-hdr_graphics_pipeline : v.Pipeline = .null_handle,
+graphics_vert_bufs    : [MAX_FRAMES_IN_FLIGHT]Buffer = .{.null, .null},
+graphics_vert_maps    : [MAX_FRAMES_IN_FLIGHT][]Vertex_Data = undefined,
+off_screen_graphics_pipeline : v.Pipeline = .null_handle,
 compute_pipelines     : [COMPUTE_STAGE_COUNT]v.Pipeline = .{.null_handle},
 
 command_pool               : v.CommandPool = .null_handle,
@@ -67,13 +68,50 @@ in_flight_fences              : [MAX_FRAMES_IN_FLIGHT]v.Fence = undefined,
 compute_finished_semas        : [COMPUTE_STAGE_COUNT]v.Semaphore = undefined,
 compute_in_flight_fence       : v.Fence = undefined,
 
+gpa   : Allocator = undefined,
+arena : std.heap.ArenaAllocator = undefined,
+
 frame_counter: u32 = 0,
 
 per_frame: struct {
     curr_frame: u32 = 0,
     push_constant: *const anyopaque = undefined,
     push_constant_size: u32 = 0,
+    vertexes: std.ArrayList(Vertex_Data) = .empty,
 } = .{},
+
+pub const Vertex_Data = extern struct {
+    pos: [2]f32,
+    color: Color,
+    tex: [2]f32,
+
+    pub fn get_input_attrs(binding: u32) [3]v.VertexInputAttributeDescription {
+        return .{
+            .{
+                .location = 0,
+                .binding = binding,
+                .format = .r32g32_sfloat,
+                .offset = @offsetOf(Vertex_Data, "pos"),
+            },
+            .{
+                .location = 1,
+                .binding = binding,
+                .format = .r32g32b32a32_sfloat,
+                .offset = @offsetOf(Vertex_Data, "color"),
+
+            },
+            .{
+                .location = 2,
+                .binding = binding,
+                .format = .r32g32_sfloat,
+                .offset = @offsetOf(Vertex_Data, "tex"),
+
+            },
+
+
+        };
+    }
+};
 // pub fn init_window(w: u32, h: u32, name: []const u8) void {
 //
 // }
@@ -83,7 +121,10 @@ const vkGetInstanceProcAddr = @extern(v.PfnGetInstanceProcAddr, .{
     .library_name = "vulkan-1",
 });
 
-pub fn init_instance() !Instance {
+pub fn init_instance(gpa: Allocator) !void {
+    state.gpa = gpa;
+    state.arena = .init(gpa);
+
     state.vkb = v.BaseWrapper.load(vkGetInstanceProcAddr);
     var app_info = v.ApplicationInfo {
         .application_version = @bitCast(v.API_VERSION_1_2),
@@ -123,18 +164,15 @@ pub fn init_instance() !Instance {
     state.instance_handle = handle;
     state.instance_wrapper = .load(handle, vkGetInstanceProcAddr);
     state.instance = .init(handle, &state.instance_wrapper);
-
-    return state.instance;
 }
 
-pub fn init_surface(window: *r.RGFW_window) !v.SurfaceKHR {
+pub fn init_surface(window: *r.RGFW_window) !void {
     // FIXME: #platform
     const create_info = v.Win32SurfaceCreateInfoKHR {
         .hwnd = @ptrCast(r.RGFW_window_getHWND(window)),
         .hinstance = @ptrCast(r.RGFW_window_getHINSTANCE()),
     };
     state.surface = try state.instance.createWin32SurfaceKHR(&create_info, null);
-    return state.surface;
 }
 
 pub fn is_device_good(device: v.PhysicalDevice) bool {
@@ -155,7 +193,8 @@ pub fn is_device_good(device: v.PhysicalDevice) bool {
     return vulkan11_features.variable_pointers == .true;
 }
 
-pub fn init_device(arena: std.mem.Allocator, window_width: u32, window_height: u32) !Device {
+pub fn init_device(window_width: u32, window_height: u32) !Device {
+    const arena = state.arena.allocator();
     var device_count: u32 = 0;
     _ = try state.instance.enumeratePhysicalDevices(&device_count, null);
     log.info("found {} devices: ", .{device_count});
@@ -280,7 +319,7 @@ pub fn init_queues(device: Device) void {
     state.compute_queue  = device.getDeviceQueue(state.graphics_compute_family, 0);
 }
 
-pub fn init_swapchain(device: Device) !v.SwapchainKHR {
+pub fn init_swapchain(device: Device) !void {
     const image_count = state.surface_details.min_image_count;
     assert(state.surface_details.max_image_count != 0 and image_count <= state.surface_details.max_image_count);
 
@@ -309,10 +348,10 @@ pub fn init_swapchain(device: Device) !v.SwapchainKHR {
     }
 
     state.swapchain = try device.createSwapchainKHR(&create_info, null);
-    return state.swapchain;
 }
 
-pub fn init_image_views(arena: std.mem.Allocator, device: Device) !void {
+pub fn init_image_views(device: Device) !void {
+    const arena = state.arena.allocator();
     var image_count: u32 = 0;
     _ = try device.getSwapchainImagesKHR(state.swapchain, &image_count, null);
     log.info("swapchain image: {}", .{image_count});
@@ -419,11 +458,14 @@ pub fn cleanup() void {
     device.destroyDescriptorSetLayout(state.descriptor_set_layout, null);
     device.destroyPipelineLayout(state.pipeline_layout, null);
     device.destroyRenderPass(state.render_pass, null);
-    device.destroyRenderPass(state.hdr_render_pass, null);
+    device.destroyRenderPass(state.off_screen_render_pass, null);
     device.destroyPipeline(state.graphics_pipeline, null);
+    for (state.graphics_vert_bufs) |buf| {
+        device.unmapMemory(buf.mem);
+        buf.destroy();
+    }
 
-    device.destroyPipelineLayout(state.hdr_pipeline_layout, null);
-    device.destroyPipeline(state.hdr_graphics_pipeline, null);
+    device.destroyPipeline(state.off_screen_graphics_pipeline, null);
     for (state.compute_pipelines) |pipeline|
         device.destroyPipeline(pipeline, null);
 
@@ -445,6 +487,8 @@ pub fn cleanup() void {
 
     instance.destroySurfaceKHR(state.surface, null);
     instance.destroyInstance(null);
+
+    state.arena.deinit();
 }
 
 
@@ -528,12 +572,12 @@ pub fn create_render_pass(opts: Render_Pass_Options) !v.RenderPass {
 }
 
 pub fn init_hdr_render_pass() !void {
-    state.hdr_render_pass = try create_render_pass(.{
+    state.off_screen_render_pass = try create_render_pass(.{
         .format = HDR_FORMAT,
         .off_screen = true,
     });
     state.hdr_frame_buffer = try state.device.createFramebuffer(&.{
-        .render_pass = state.hdr_render_pass,
+        .render_pass = state.off_screen_render_pass,
         .attachment_count = 1,
         .p_attachments = @ptrCast(&state.hdr_image_view),
         .width = state.extent.width,
@@ -840,24 +884,30 @@ fn create_pipeline(opts: Pipeline_Options) !v.Pipeline {
     return pipeline;
 }
 
-pub fn init_pipeline(
-    vert_input_stride: usize,
-    vert_input_attrs: []const v.VertexInputAttributeDescription) !void {
+pub fn init_pipeline() !void {
     state.graphics_pipeline = try create_pipeline(.{
         .vert_shader_name  = "vert_hdr",
         .frag_shader_name  = "frag_hdr",
-        .vert_input_stride = vert_input_stride,
-        .vert_input_attrs  = vert_input_attrs,
+        .vert_input_stride = @sizeOf(Vertex_Data),
+        .vert_input_attrs  = &Vertex_Data.get_input_attrs(0),
         .render_pass       = state.render_pass,
     });
+    const MAX_VERT_LEN = 64;
+    for (&state.graphics_vert_bufs, &state.graphics_vert_maps) |*buf, *map| {
+        buf.* = try create_buffer(
+            MAX_VERT_LEN*@sizeOf(Vertex_Data),
+            .{ .transfer_dst = true, .vertex_buffer = true },
+            .{ .host_visible = true, .host_coherent = true });
+        map.* = try map_mem(buf.mem, Vertex_Data, MAX_VERT_LEN);
+    }
 }
 
-pub fn init_hdr_pipeline() !void {
-    state.hdr_graphics_pipeline = try create_pipeline(.{
+pub fn init_off_screen_pipeline() !void {
+    state.off_screen_graphics_pipeline = try create_pipeline(.{
         .vert_shader_name = "vert",
         .frag_shader_name = "frag",
         .blend_mode = .additive,
-        .render_pass = state.hdr_render_pass
+        .render_pass = state.off_screen_render_pass
     });
 }
 
@@ -910,7 +960,7 @@ pub fn init_command_buffers(device: Device) !void {
     try device.allocateCommandBuffers(&.{
         .command_pool = state.command_pool,
         .level = .primary,
-        .command_buffer_count = MAX_FRAMES_IN_FLIGHT,
+        .command_buffer_count = COMPUTE_STAGE_COUNT,
     }, &state.compute_command_buffers);
 }
 
@@ -927,6 +977,8 @@ pub const Buffer = struct {
     buf: v.Buffer,
     mem: v.DeviceMemory,
 
+    pub const @"null" = Buffer { .buf = .null_handle, .mem = .null_handle };
+
     pub fn destroy(self: Buffer) void {
         state.device.destroyBuffer(self.buf, null);
         state.device.freeMemory(self.mem, null);
@@ -939,7 +991,7 @@ pub fn create_buffer(size: usize, usage: v.BufferUsageFlags, properties: v.Memor
         .size = @intCast(size),
         .usage = usage,
         .sharing_mode = .exclusive,
-    }, null); 
+    }, null);
 
     // Allocate Device Memory
     const requiremenst = device.getBufferMemoryRequirements(buf);
@@ -1000,7 +1052,7 @@ pub fn map_mem(mem: v.DeviceMemory, comptime T: type, len: usize) ![]T {
     const size = @sizeOf(T) * len;
     const ptr: [*]T = @alignCast(@ptrCast(try device.mapMemory(mem, 0, size, .{})));
     return ptr[0..len];
-} 
+}
 
 pub fn init_sync_primitives(device: Device) !void {
     for (0..MAX_FRAMES_IN_FLIGHT) |i| {
@@ -1019,19 +1071,23 @@ pub fn init_sync_primitives(device: Device) !void {
 
 }
 
-pub fn draw_frame(vertex_count: u32, vertex_buf: v.Buffer) !void {
+pub fn draw_frame(particle_vert_ct: u32) !void {
     const curr_frame = &state.per_frame.curr_frame;
     const image_idx = try acquire_image(curr_frame.*);
 
-    try record_graphics_cmd(
-        curr_frame.*,
-        state.graphics_command_buffers[curr_frame.*],
-        state.frame_buffers[image_idx], state.graphics_pipeline, vertex_count, vertex_buf);
+    const vert_ct = state.per_frame.vertexes.items.len;
+    @memcpy(state.graphics_vert_maps[curr_frame.*][0..vert_ct], state.per_frame.vertexes.items);
+    defer state.per_frame.vertexes.clearRetainingCapacity();
 
     try record_graphics_cmd(
         curr_frame.*,
         state.graphics_command_buffers[curr_frame.*],
-        state.frame_buffers[image_idx], state.graphics_pipeline, vertex_count, vertex_buf);
+        state.frame_buffers[image_idx], state.graphics_pipeline, particle_vert_ct, @intCast(vert_ct));
+
+    // try record_graphics_cmd(
+    //     curr_frame.*,
+    //     state.graphics_command_buffers[curr_frame.*],
+    //     state.frame_buffers[image_idx], state.graphics_pipeline, vertex_count, vertex_buf);
     try submit_graphics_cmd(state.graphics_command_buffers[curr_frame.*], curr_frame.*, image_idx);
     curr_frame.* = (curr_frame.* + 1) % MAX_FRAMES_IN_FLIGHT;
     state.frame_counter += 1;
@@ -1048,18 +1104,19 @@ pub fn acquire_image(curr_frame: u32) !u32 {
 
 pub fn record_graphics_cmd(
     curr_frame: u32,
-    command_buffer: v.CommandBuffer,
+    cmd: v.CommandBuffer,
     frame_buffer: v.Framebuffer, pipeline: v.Pipeline,
-    vertex_count: u32, vertex_buf: v.Buffer) !void {
+    particle_vert_ct: u32,
+    vert_ct: u32) !void {
     const device = state.device;
 
-    try device.resetCommandBuffer(command_buffer, .{});
-    try device.beginCommandBuffer(command_buffer, &.{});
+    try device.resetCommandBuffer(cmd, .{});
+    try device.beginCommandBuffer(cmd, &.{});
 
     {
         // Render particles system to a HDR texture
-        device.cmdBeginRenderPass(command_buffer, &.{
-            .render_pass = state.hdr_render_pass, .framebuffer = state.hdr_frame_buffer,
+        device.cmdBeginRenderPass(cmd, &.{
+            .render_pass = state.off_screen_render_pass, .framebuffer = state.hdr_frame_buffer,
             .render_area = .{
                 .offset = .{.x=0,.y=0},
                 .extent = state.extent,
@@ -1070,25 +1127,25 @@ pub fn record_graphics_cmd(
                     .color = .{ .float_32 = .{0,0,0,1} },
                 }
             },
-            }, .@"inline");
-        device.cmdBindPipeline(command_buffer, .graphics, state.hdr_graphics_pipeline);
-        device.cmdSetViewport(command_buffer, 0, &.{state.viewport});
-        device.cmdSetScissor(command_buffer, 0, &.{state.scissor});
+        }, .@"inline");
+        device.cmdBindPipeline(cmd, .graphics, state.off_screen_graphics_pipeline);
+        device.cmdSetViewport(cmd, 0, &.{state.viewport});
+        device.cmdSetScissor(cmd, 0, &.{state.scissor});
 
         if (state.per_frame.push_constant_size > 0)
-            device.cmdPushConstants(command_buffer, state.pipeline_layout, .{ .vertex = true, .fragment = true, .compute = true }, 0,
+            device.cmdPushConstants(cmd, state.pipeline_layout, .{ .vertex = true, .fragment = true, .compute = true }, 0,
                 state.per_frame.push_constant_size, state.per_frame.push_constant);
 
-        device.cmdBindDescriptorSets(command_buffer,
+        device.cmdBindDescriptorSets(cmd,
             .graphics, state.pipeline_layout, 0, &.{ state.descriptor_set[curr_frame] }, null);
-        device.cmdBindVertexBuffers(command_buffer, 0, &.{vertex_buf}, &.{0});
-        device.cmdDraw(command_buffer, vertex_count, 1, 0, 0);
+        // device.cmdBindVertexBuffers(cmd, 0, &.{vertex_buf}, &.{0});
+        device.cmdDraw(cmd, particle_vert_ct, 1, 0, 0);
 
-        device.cmdEndRenderPass(command_buffer);
+        device.cmdEndRenderPass(cmd);
     }
     {
         // Render HDR texture to screen
-        device.cmdBeginRenderPass(command_buffer, &.{
+        device.cmdBeginRenderPass(cmd, &.{
             .render_pass = state.render_pass, .framebuffer = frame_buffer,
             .render_area = .{
                 .offset = .{.x=0,.y=0},
@@ -1102,23 +1159,23 @@ pub fn record_graphics_cmd(
             },
             }, .@"inline");
 
-        device.cmdBindPipeline(command_buffer, .graphics, pipeline);
+        device.cmdBindPipeline(cmd, .graphics, pipeline);
 
-        device.cmdSetViewport(command_buffer, 0, &.{state.viewport});
-        device.cmdSetScissor(command_buffer, 0, &.{state.scissor});
+        device.cmdSetViewport(cmd, 0, &.{state.viewport});
+        device.cmdSetScissor(cmd, 0, &.{state.scissor});
 
         if (state.per_frame.push_constant_size > 0)
-            device.cmdPushConstants(command_buffer, state.pipeline_layout, .{ .vertex = true, .fragment = true, .compute = true }, 0,
+            device.cmdPushConstants(cmd, state.pipeline_layout, .{ .vertex = true, .fragment = true, .compute = true }, 0,
                 state.per_frame.push_constant_size, state.per_frame.push_constant);
 
-        device.cmdBindDescriptorSets(command_buffer,
+        device.cmdBindDescriptorSets(cmd,
             .graphics, state.pipeline_layout, 0, &.{ state.descriptor_set[curr_frame] }, null);
-        // device.cmdBindVertexBuffers(command_buffer, 0, &.{vertex_buf}, &.{0});
-        device.cmdDraw(command_buffer, 6, 1, 0, 0);
-        device.cmdEndRenderPass(command_buffer);
+        device.cmdBindVertexBuffers(cmd, 0, &.{state.graphics_vert_bufs[curr_frame].buf}, &.{0});
+        device.cmdDraw(cmd, vert_ct, 1, 0, 0);
+        device.cmdEndRenderPass(cmd);
     }
 
-    try device.endCommandBuffer(command_buffer);
+    try device.endCommandBuffer(cmd);
 }
 
 pub fn submit_graphics_cmd(curr_command_buffer: v.CommandBuffer, curr_frame: u32, image_idx: u32) !void {
@@ -1198,3 +1255,33 @@ pub fn dispatch_compute(dispatch_x: u32, compute_stage: u32) !void {
     }
     try device.queueSubmit(state.graphics_queue, &.{submit_info}, if (compute_stage == COMPUTE_STAGE_COUNT-1) state.compute_in_flight_fence else .null_handle);
 }
+
+pub const Rect = struct {
+    pos: [2]f32,
+    size: [2]f32,
+
+    pub const screen = Rect {
+        .pos = .{-1,-1},
+        .size = .{2,2},
+    };
+};
+
+pub const Color = [4]f32;
+const V2 = @Vector(2, f32);
+const V3 = @Vector(3, f32);
+const V4 = @Vector(4, f32);
+
+pub const Draw = struct {
+    fn push_vertex(vertex: Vertex_Data) void {
+        state.per_frame.vertexes.append(state.gpa, vertex) catch @panic("OOM");
+    }
+    pub fn rectangle(rect: Rect, color: Color) void {
+        push_vertex(.{ .pos = rect.pos,                      .tex = .{0,1}, .color = color });
+        push_vertex(.{ .pos = rect.pos + V2{rect.size[0],0}, .tex = .{1,1}, .color = color });
+        push_vertex(.{ .pos = rect.pos + V2{0,rect.size[1]}, .tex = .{0,0}, .color = color });
+
+        push_vertex(.{ .pos = rect.pos + V2{rect.size[0],0}, .tex = .{1,1}, .color = color });
+        push_vertex(.{ .pos = rect.pos + @as(V2, rect.size), .tex = .{1,0}, .color = color });
+        push_vertex(.{ .pos = rect.pos + V2{0,rect.size[1]}, .tex = .{0,0}, .color = color });
+    }
+};

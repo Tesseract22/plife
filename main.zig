@@ -9,24 +9,6 @@ pub const Particle = extern struct {
     pos: [2]f32,
     spd: [2]f32,
     specie: u32,
-
-    pub fn get_input_attrs(binding: u32) [2]v.VertexInputAttributeDescription {
-        return .{
-            .{
-                .location = 0,
-                .binding = binding,
-                .format = .r32g32_sfloat,
-                .offset = @offsetOf(Particle, "pos"),
-            },
-            .{
-                .location = 1,
-                .binding = binding,
-                .format = .r8_uint,
-                .offset = @offsetOf(Particle, "pos"),
-
-            }
-        };
-    }
 };
 
 pub const Particle_Specie = extern struct {
@@ -74,7 +56,7 @@ pub fn randomize_config(particle_force_configs: []Force_Config, specie_ct: u32, 
     var i: usize = 0;
     for (0..specie_ct) |_| {
         for (0..specie_ct) |_| {
-            particle_force_configs[i] = 
+            particle_force_configs[i] =
                 .{
                     .radius = float_range(rand, r_force_radius_min, r_force_radius_max),
                     .strength = random_sign(rand) * float_range(rand, r_force_strength_min, r_force_strength_max),
@@ -133,13 +115,13 @@ pub fn main(init: std.process.Init) !void {
     //
     // Create Instance
     //
-    _ = try vulkan.init_instance();
-    _ = try vulkan.init_surface(window);
+    try vulkan.init_instance(arena);
+    try vulkan.init_surface(window);
     defer vulkan.cleanup();
-    const device = try vulkan.init_device(arena, WINDOW_W, WINDOW_H);
+    const device = try vulkan.init_device(WINDOW_W, WINDOW_H);
     vulkan.init_queues(device);
-    _ = try vulkan.init_swapchain(device);
-    _ = try vulkan.init_image_views(arena, device);
+    try vulkan.init_swapchain(device);
+    try vulkan.init_image_views(device);
     try vulkan.init_shader_modules();
     try vulkan.init_render_pass();
     try vulkan.init_hdr_render_pass();
@@ -164,8 +146,8 @@ pub fn main(init: std.process.Init) !void {
 
     try vulkan.init_descriptor_set(.{part_buf1.buf, part_buf2.buf}, grid_offsets_buf.buf);
     try vulkan.init_pipeline_layout(@sizeOf(Push_Constant));
-    try vulkan.init_pipeline(@sizeOf(Particle), &Particle.get_input_attrs(0));
-    try vulkan.init_hdr_pipeline();
+    try vulkan.init_pipeline();
+    try vulkan.init_off_screen_pipeline();
     try vulkan.init_compute_pipeline();
     _ = try vulkan.init_frame_buffers(arena, device);
 
@@ -178,7 +160,7 @@ pub fn main(init: std.process.Init) !void {
 
     var camera = Camera {};
     var camera_target = Camera {};
-    
+
     var ping_pong = true;
     while (r.RGFW_window_shouldClose(window) == 0) {
         // TODO: limit frame rate
@@ -230,12 +212,14 @@ pub fn main(init: std.process.Init) !void {
         camera.pos[0] = exp_smooth(camera.pos[0], camera_target.pos[0], dt * CAMERA_SMOOTH_SPD);
         camera.pos[1] = exp_smooth(camera.pos[1], camera_target.pos[1], dt * CAMERA_SMOOTH_SPD);
 
+        vulkan.Draw.rectangle(.screen, .{1,1,1,1});
+
         vulkan.set_push_constant(Push_Constant, &.{
             .camera = camera, .species = species, .specie_ct = specie_ct, .particle_ct = particles.len,
             .collision_cfg = collision_cfg, .particle_force_configs = particle_force_configs, .ping_pong = ping_pong });
         try vulkan.dispatch_compute((particles.len+KERNEL_WORKGROUP_X-1)/KERNEL_WORKGROUP_X, 0);
         // try vulkan.dispatch_compute((particles.len+KERNEL_WORKGROUP_X-1)/KERNEL_WORKGROUP_X, 1);
-        try vulkan.draw_frame(@intCast(particles.len * VERT_PER_PARTICLE), part_buf1.buf);
+        try vulkan.draw_frame(@intCast(particles.len * VERT_PER_PARTICLE));
         ping_pong = !ping_pong;
     }
     try device.deviceWaitIdle();
