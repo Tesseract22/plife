@@ -117,7 +117,7 @@ pub fn main(init: std.process.Init) !void {
     //
     try vulkan.init_instance(arena);
     try vulkan.init_surface(window);
-    defer vulkan.cleanup();
+    // defer vulkan.cleanup();
     const device = try vulkan.init_device(WINDOW_W, WINDOW_H);
     vulkan.init_queues(device);
     try vulkan.init_swapchain(device);
@@ -144,7 +144,8 @@ pub fn main(init: std.process.Init) !void {
     try vulkan.copy_buffer(part_buf1, staging_buf, particles_size);
     try vulkan.copy_buffer(part_buf2, staging_buf, particles_size);
 
-    try vulkan.init_descriptor_set(.{part_buf1.buf, part_buf2.buf}, grid_offsets_buf.buf);
+    try vulkan.init_particle_desc_set(.{part_buf1.buf, part_buf2.buf}, grid_offsets_buf.buf);
+    try vulkan.init_triangle_desc_set();
     try vulkan.init_pipeline_layout(@sizeOf(Push_Constant));
     try vulkan.init_pipeline();
     try vulkan.init_off_screen_pipeline();

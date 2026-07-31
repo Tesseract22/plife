@@ -123,19 +123,6 @@ const Fragment = struct {
         // };
     }
 
-    const sampled_image = @extern(
-        *addrspace(.constant) const SampledImage,
-        .{
-            .name = "sampled_image",
-            .decoration = .{
-                .descriptor = .{
-                    .set = 0,
-                    .binding = 3,
-                },
-                },
-            },
-            );
-
     fn simple_tm(hdrColor: V3) V3 {
         return hdrColor / (hdrColor + splat3(1.0));
     }
@@ -161,6 +148,15 @@ const Fragment = struct {
             .name = "tex_coord",
             .decoration = .{ .location = 0 },
         }).*;
+        const sampled_image = @extern(*addrspace(.constant) const SampledImage, .{
+            .name = "sampled_image",
+            .decoration = .{
+                .descriptor = .{
+                    .set = 0,
+                    .binding = 0,
+                },
+            },
+        });
 
         const hdr_color_a = spirv.imageSampleImplicitLod(sampled_image, tex_coord);
         const hdr_color = V3 {hdr_color_a[0], hdr_color_a[1], hdr_color_a[2]};

@@ -46,10 +46,13 @@ off_screen_render_pass   : v.RenderPass = .null_handle,
 hdr_frame_buffer  : v.Framebuffer = .null_handle,
 hdr_sampler       : v.Sampler = .null_handle,
 
-descriptor_set_layout : v.DescriptorSetLayout = .null_handle,
-pipeline_layout   : v.PipelineLayout = .null_handle,
+particle_desc_set_layout : v.DescriptorSetLayout = .null_handle,
+triangle_desc_set_layout : v.DescriptorSetLayout = .null_handle,
+particle_pl_layout   : v.PipelineLayout = .null_handle,
+triangle_pl_layout   : v.PipelineLayout = .null_handle,
 descriptor_pool   : v.DescriptorPool = .null_handle,
-descriptor_set    : [MAX_FRAMES_IN_FLIGHT]v.DescriptorSet = .{.null_handle, .null_handle},
+particle_desc_set : [MAX_FRAMES_IN_FLIGHT]v.DescriptorSet = .{.null_handle, .null_handle},
+triangle_desc_set : [MAX_FRAMES_IN_FLIGHT]v.DescriptorSet = .{.null_handle, .null_handle},
 
 graphics_pipeline     : v.Pipeline = .null_handle,
 graphics_vert_bufs    : [MAX_FRAMES_IN_FLIGHT]Buffer = .{.null, .null},
@@ -455,8 +458,10 @@ pub fn cleanup() void {
     device.destroyDescriptorPool(state.descriptor_pool, null);
     device.destroyCommandPool(state.command_pool, null);
 
-    device.destroyDescriptorSetLayout(state.descriptor_set_layout, null);
-    device.destroyPipelineLayout(state.pipeline_layout, null);
+    device.destroyDescriptorSetLayout(state.particle_desc_set_layout, null);
+    device.destroyDescriptorSetLayout(state.triangle_desc_set_layout, null);
+    device.destroyPipelineLayout(state.particle_pl_layout, null);
+    device.destroyPipelineLayout(state.triangle_pl_layout, null);
     device.destroyRenderPass(state.render_pass, null);
     device.destroyRenderPass(state.off_screen_render_pass, null);
     device.destroyPipeline(state.graphics_pipeline, null);
@@ -608,8 +613,32 @@ pub fn init_frame_buffers(arena: std.mem.Allocator, device: Device) !void {
     }
 }
 
+fn write_texture_to_descriptor(curr_frame: u32) void {
+    const writes = [_]v.WriteDescriptorSet {
+        .{
+            .dst_set = state.triangle_desc_set[curr_frame],
+            .dst_binding = 0,
+            .dst_array_element = 0,
+            .descriptor_count = 1,
+            .descriptor_type = .combined_image_sampler,
+            
+            .p_image_info = &.{
+                .{
+                    .image_layout = .shader_read_only_optimal,
+                        .sampler = state.hdr_sampler,
+                        .image_view = state.hdr_image_view,
+                }
+            },
+            
+            .p_buffer_info = &.{},
+            .p_texel_buffer_view = &.{},
+        }
+    };
+    state.device.updateDescriptorSets(&writes, null);
+}
+
 // Descriptor Set describes how storage buffer etc. is accessed in shaders
-pub fn init_descriptor_set(ping_pong: [MAX_FRAMES_IN_FLIGHT]v.Buffer, grid_offsets: v.Buffer) !void {
+pub fn init_particle_desc_set(ping_pong: [MAX_FRAMES_IN_FLIGHT]v.Buffer, grid_offsets: v.Buffer) !void {
     const device = state.device;
     const bindings = [_]v.DescriptorSetLayoutBinding{
         .{ // particles ping buffer
@@ -638,104 +667,110 @@ pub fn init_descriptor_set(ping_pong: [MAX_FRAMES_IN_FLIGHT]v.Buffer, grid_offse
         }
     };
 
-    state.descriptor_set_layout = try state.device.createDescriptorSetLayout(&.{
+    state.particle_desc_set_layout = try state.device.createDescriptorSetLayout(&.{
         .binding_count = @intCast(bindings.len),
         .p_bindings = &bindings,
     }, null);
 
-    {
-        state.descriptor_pool = try device.createDescriptorPool(&.{
-            .max_sets = MAX_FRAMES_IN_FLIGHT,
-            .pool_size_count = bindings.len,
-            .p_pool_sizes = &.{
-                .{
-                    .type = .storage_buffer,
-                    .descriptor_count = 2,
-                },
-                .{
-                    .type = .storage_buffer,
-                    .descriptor_count = 2,
-                },
-                .{
-                    .type = .storage_buffer,
-                    .descriptor_count = 2,
-                },
-                .{
-                    .type = .combined_image_sampler,
-                    .descriptor_count = 2,
-                }
+    const pool_sizes = [_]v.DescriptorPoolSize {
+        .{
+            .type = .storage_buffer,
+            .descriptor_count = 2,
+        },
+        .{
+            .type = .storage_buffer,
+            .descriptor_count = 2,
+        },
+        .{
+            .type = .storage_buffer,
+            .descriptor_count = 2,
+        },
+        .{
+            .type = .combined_image_sampler,
+            .descriptor_count = 2,
+        }
+    };
+    state.descriptor_pool = try device.createDescriptorPool(&.{
+        .max_sets = MAX_FRAMES_IN_FLIGHT + MAX_FRAMES_IN_FLIGHT,
+        .pool_size_count = pool_sizes.len,
+        .p_pool_sizes = &pool_sizes
+    }, null);
+    // defer device.destroyDescriptorPool(state.descriptor_pool, null);
+
+    // Allocate
+    try device.allocateDescriptorSets(&.{
+        .descriptor_pool = state.descriptor_pool,
+            .descriptor_set_count = MAX_FRAMES_IN_FLIGHT,
+            .p_set_layouts = &.{state.particle_desc_set_layout, state.particle_desc_set_layout}, // same layout for both set
+    }, &state.particle_desc_set);
+
+    for (0..MAX_FRAMES_IN_FLIGHT) |i| {
+        // Write buffer references into the set
+        const ssbo_info = [_]v.DescriptorBufferInfo {.
+            {
+                .buffer = ping_pong[i],
+                    .offset = 0,
+                    .range = v.WHOLE_SIZE,
             },
-        }, null);
-        // defer device.destroyDescriptorPool(state.descriptor_pool, null);
-
-        // Allocate
-        try device.allocateDescriptorSets(&.{
-            .descriptor_pool = state.descriptor_pool,
-            .descriptor_set_count = state.descriptor_set.len,
-            .p_set_layouts = &.{state.descriptor_set_layout, state.descriptor_set_layout}, // same layout for both set
-        }, &state.descriptor_set);
-
-        for (0..MAX_FRAMES_IN_FLIGHT) |i| {
-            // Write buffer references into the set
-            const ssbo_info = [_]v.DescriptorBufferInfo {.
-                {
-                    .buffer = ping_pong[i],
+            .{
+                .buffer = ping_pong[(i+1)%MAX_FRAMES_IN_FLIGHT],
                     .offset = 0,
                     .range = v.WHOLE_SIZE,
-                },
-                .{
-                    .buffer = ping_pong[(i+1)%MAX_FRAMES_IN_FLIGHT],
+            },
+            .{
+                .buffer = grid_offsets,
                     .offset = 0,
                     .range = v.WHOLE_SIZE,
-                },
-                .{
-                    .buffer = grid_offsets,
-                    .offset = 0,
-                    .range = v.WHOLE_SIZE,
-                },
-            };
-
-            const writes = [_]v.WriteDescriptorSet {
-                .{
-                    .dst_set = state.descriptor_set[i],
+            },
+        };
+        
+        const writes = [_]v.WriteDescriptorSet {
+            .{
+                .dst_set = state.particle_desc_set[i],
                     .dst_binding = 0,
                     .dst_array_element = 0,
                     .descriptor_count = 3,
                     .descriptor_type = .storage_buffer,
                     .p_buffer_info = &ssbo_info,
-
+                    
                     .p_image_info = &.{},
                     .p_texel_buffer_view = &.{},
-                },
-                .{
-                    .dst_set = state.descriptor_set[i],
-                    .dst_binding = 3,
-                    .dst_array_element = 0,
-                    .descriptor_count = 1,
-                    .descriptor_type = .combined_image_sampler,
-
-                    .p_image_info = &.{
-                        .{
-                            .image_layout = .shader_read_only_optimal,
-                            .sampler = state.hdr_sampler,
-                            .image_view = state.hdr_image_view,
-                        }
-                    },
-
-                    .p_buffer_info = &.{},
-                    .p_texel_buffer_view = &.{},
-                }
-            };
-
-            device.updateDescriptorSets(&writes, null);
-        }
+            },
+        };
+        
+        device.updateDescriptorSets(&writes, null);
     }
 }
 
+pub fn init_triangle_desc_set() !void {
+    const device = state.device;
+    const bindings = [_]v.DescriptorSetLayoutBinding{
+        .{ // texture
+            .binding = 0,
+            .descriptor_type = .combined_image_sampler,
+            .descriptor_count = 1,
+            .stage_flags = .{ .fragment = true },
+        }
+    };
+
+    state.triangle_desc_set_layout = try state.device.createDescriptorSetLayout(&.{
+        .binding_count = @intCast(bindings.len),
+        .p_bindings = &bindings,
+    }, null);
+
+    // Allocate
+    try device.allocateDescriptorSets(&.{
+        .descriptor_pool = state.descriptor_pool,
+            .descriptor_set_count = 2,
+            .p_set_layouts = &.{state.triangle_desc_set_layout, state.triangle_desc_set_layout}, // same layout for both set
+    }, &state.triangle_desc_set);
+    // Writing buffer references is done per frame
+}
+
 pub fn init_pipeline_layout(push_constant_size: usize) !void {
-    state.pipeline_layout = try state.device.createPipelineLayout(&.{
+    state.particle_pl_layout = try state.device.createPipelineLayout(&.{
         .set_layout_count = 1,
-        .p_set_layouts = &.{state.descriptor_set_layout},
+        .p_set_layouts = &.{state.particle_desc_set_layout},
         .push_constant_range_count = 1,
         .p_push_constant_ranges =
             if (push_constant_size > 0) &.{ .{
@@ -744,6 +779,13 @@ pub fn init_pipeline_layout(push_constant_size: usize) !void {
                 .size = @intCast(push_constant_size),
             }} else &.{}
     }, null);
+
+    state.triangle_pl_layout = try state.device.createPipelineLayout(&.{
+        .set_layout_count = 1,
+        .p_set_layouts = &.{state.triangle_desc_set_layout},
+        .p_push_constant_ranges = &.{}
+    }, null);
+
 }
 
 pub const Blend_Mode = enum {
@@ -758,6 +800,7 @@ pub const Pipeline_Options = struct {
     vert_input_attrs: []const v.VertexInputAttributeDescription = &.{},
     blend_mode: Blend_Mode = .normal,
     render_pass: v.RenderPass,
+    layout: v.PipelineLayout,
 };
 
 fn create_pipeline(opts: Pipeline_Options) !v.Pipeline {
@@ -874,7 +917,7 @@ fn create_pipeline(opts: Pipeline_Options) !v.Pipeline {
         .p_multisample_state = &multi_sample_state_info,
         .p_color_blend_state = &color_blend_info,
         .p_dynamic_state = &dynamic_state_info,
-        .layout = state.pipeline_layout,
+        .layout = opts.layout,
         .render_pass = opts.render_pass,
         .subpass = 0,
         .base_pipeline_index = -1,
@@ -891,6 +934,7 @@ pub fn init_pipeline() !void {
         .vert_input_stride = @sizeOf(Vertex_Data),
         .vert_input_attrs  = &Vertex_Data.get_input_attrs(0),
         .render_pass       = state.render_pass,
+        .layout            = state.triangle_pl_layout,
     });
     const MAX_VERT_LEN = 64;
     for (&state.graphics_vert_bufs, &state.graphics_vert_maps) |*buf, *map| {
@@ -907,7 +951,8 @@ pub fn init_off_screen_pipeline() !void {
         .vert_shader_name = "vert",
         .frag_shader_name = "frag",
         .blend_mode = .additive,
-        .render_pass = state.off_screen_render_pass
+        .render_pass = state.off_screen_render_pass,
+        .layout = state.particle_pl_layout,
     });
 }
 
@@ -933,7 +978,7 @@ pub fn init_compute_pipeline() !void {
         //     .base_pipeline_index = -1,
         // },
         .{
-            .layout = state.pipeline_layout,
+            .layout = state.particle_pl_layout,
             .stage  = compute_shader_infos[0],
             .base_pipeline_index = -1,
         }
@@ -1078,16 +1123,13 @@ pub fn draw_frame(particle_vert_ct: u32) !void {
     const vert_ct = state.per_frame.vertexes.items.len;
     @memcpy(state.graphics_vert_maps[curr_frame.*][0..vert_ct], state.per_frame.vertexes.items);
     defer state.per_frame.vertexes.clearRetainingCapacity();
+    write_texture_to_descriptor(curr_frame.*);
 
     try record_graphics_cmd(
         curr_frame.*,
         state.graphics_command_buffers[curr_frame.*],
-        state.frame_buffers[image_idx], state.graphics_pipeline, particle_vert_ct, @intCast(vert_ct));
+        state.frame_buffers[image_idx], particle_vert_ct, @intCast(vert_ct));
 
-    // try record_graphics_cmd(
-    //     curr_frame.*,
-    //     state.graphics_command_buffers[curr_frame.*],
-    //     state.frame_buffers[image_idx], state.graphics_pipeline, vertex_count, vertex_buf);
     try submit_graphics_cmd(state.graphics_command_buffers[curr_frame.*], curr_frame.*, image_idx);
     curr_frame.* = (curr_frame.* + 1) % MAX_FRAMES_IN_FLIGHT;
     state.frame_counter += 1;
@@ -1105,7 +1147,7 @@ pub fn acquire_image(curr_frame: u32) !u32 {
 pub fn record_graphics_cmd(
     curr_frame: u32,
     cmd: v.CommandBuffer,
-    frame_buffer: v.Framebuffer, pipeline: v.Pipeline,
+    frame_buffer: v.Framebuffer,
     particle_vert_ct: u32,
     vert_ct: u32) !void {
     const device = state.device;
@@ -1133,11 +1175,11 @@ pub fn record_graphics_cmd(
         device.cmdSetScissor(cmd, 0, &.{state.scissor});
 
         if (state.per_frame.push_constant_size > 0)
-            device.cmdPushConstants(cmd, state.pipeline_layout, .{ .vertex = true, .fragment = true, .compute = true }, 0,
+            device.cmdPushConstants(cmd, state.particle_pl_layout, .{ .vertex = true, .fragment = true, .compute = true }, 0,
                 state.per_frame.push_constant_size, state.per_frame.push_constant);
 
         device.cmdBindDescriptorSets(cmd,
-            .graphics, state.pipeline_layout, 0, &.{ state.descriptor_set[curr_frame] }, null);
+            .graphics, state.particle_pl_layout, 0, &.{ state.particle_desc_set[curr_frame] }, null);
         // device.cmdBindVertexBuffers(cmd, 0, &.{vertex_buf}, &.{0});
         device.cmdDraw(cmd, particle_vert_ct, 1, 0, 0);
 
@@ -1159,17 +1201,17 @@ pub fn record_graphics_cmd(
             },
             }, .@"inline");
 
-        device.cmdBindPipeline(cmd, .graphics, pipeline);
+        device.cmdBindPipeline(cmd, .graphics, state.graphics_pipeline);
 
         device.cmdSetViewport(cmd, 0, &.{state.viewport});
         device.cmdSetScissor(cmd, 0, &.{state.scissor});
 
-        if (state.per_frame.push_constant_size > 0)
-            device.cmdPushConstants(cmd, state.pipeline_layout, .{ .vertex = true, .fragment = true, .compute = true }, 0,
-                state.per_frame.push_constant_size, state.per_frame.push_constant);
+        // if (state.per_frame.push_constant_size > 0)
+        //     device.cmdPushConstants(cmd, state.particle_pl_layout, .{ .vertex = true, .fragment = true, .compute = true }, 0,
+        //         state.per_frame.push_constant_size, state.per_frame.push_constant);
 
         device.cmdBindDescriptorSets(cmd,
-            .graphics, state.pipeline_layout, 0, &.{ state.descriptor_set[curr_frame] }, null);
+            .graphics, state.triangle_pl_layout, 0, &.{ state.triangle_desc_set[curr_frame] }, null);
         device.cmdBindVertexBuffers(cmd, 0, &.{state.graphics_vert_bufs[curr_frame].buf}, &.{0});
         device.cmdDraw(cmd, vert_ct, 1, 0, 0);
         device.cmdEndRenderPass(cmd);
@@ -1221,8 +1263,8 @@ pub fn record_dispatch_command(curr_frame: u32, compute_stage: u32, x: u32) !voi
     try device.beginCommandBuffer(cmd, &.{});
 
     device.cmdBindPipeline(cmd, .compute, state.compute_pipelines[compute_stage]);
-    device.cmdBindDescriptorSets(cmd, .compute, state.pipeline_layout, 0, &.{state.descriptor_set[curr_frame]}, null);
-    device.cmdPushConstants(cmd, state.pipeline_layout, .{ .vertex = true, .fragment = true, .compute = true }, 0,
+    device.cmdBindDescriptorSets(cmd, .compute, state.particle_pl_layout, 0, &.{state.particle_desc_set[curr_frame]}, null);
+    device.cmdPushConstants(cmd, state.particle_pl_layout, .{ .vertex = true, .fragment = true, .compute = true }, 0,
         state.per_frame.push_constant_size, state.per_frame.push_constant);
 
     device.cmdDispatch(cmd, x, 1, 1);
