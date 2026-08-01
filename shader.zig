@@ -10,29 +10,29 @@ pub const Vertex = struct {
         .{0.5, 0.5}
     };
 
-    const constant = @extern(*addrspace(.push_constant) driver.Push_Constant, .{.name = "push_constant"});
-    const particles1 = @extern(*addrspace(.storage_buffer) const Particle_Array , .{
-        .name = "particles1",
-        .decoration = .{ .descriptor = .{ .set = 0, .binding = 0 } },
-    });
-    const particles2 = @extern(*addrspace(.storage_buffer) const Particle_Array , .{
-        .name = "particles2",
-        .decoration = .{ .descriptor = .{ .set = 0, .binding = 1 } },
-    });
-    const frag_color = @extern(*addrspace(.output) V3, .{
-        .name = "frag_color",
-        .decoration = .{ .location = 0 },
-    });
-    const frag_pos  = @extern(*addrspace(.output) V2, .{
-        .name = "frag_pos",
-        .decoration = .{ .location = 1 },
-    });
-    const center = @extern(*addrspace(.output) V2, .{
-        .name = "center",
-        .decoration = .{ .location = 2 },
-    });
+    fn particle_quad() callconv(.spirv_vertex) void {
+        const constant = @extern(*addrspace(.push_constant) driver.Particle_Constant, .{.name = "push_constant"});
+        const particles1 = @extern(*addrspace(.storage_buffer) const Particle_Array , .{
+            .name = "particles1",
+            .decoration = .{ .descriptor = .{ .set = 0, .binding = 0 } },
+        });
+        const particles2 = @extern(*addrspace(.storage_buffer) const Particle_Array , .{
+            .name = "particles2",
+            .decoration = .{ .descriptor = .{ .set = 0, .binding = 1 } },
+        });
+        const frag_color = @extern(*addrspace(.output) V3, .{
+            .name = "frag_color",
+            .decoration = .{ .location = 0 },
+        });
+        const frag_pos  = @extern(*addrspace(.output) V2, .{
+            .name = "frag_pos",
+            .decoration = .{ .location = 1 },
+        });
+        const center = @extern(*addrspace(.output) V2, .{
+            .name = "center",
+            .decoration = .{ .location = 2 },
+        });
 
-    fn main() callconv(.spirv_vertex) void {
 
         const camera = constant.camera;
 
@@ -51,7 +51,7 @@ pub const Vertex = struct {
         frag_color.* = constant.species[particle.specie].color;
     }
 
-    fn hdr() callconv(.spirv_vertex) void {
+    fn triangle() callconv(.spirv_vertex) void {
         const pos = @extern(*addrspace(.input) V2, .{
             .name = "pos",
             .decoration = .{ .location = 0 },
@@ -69,7 +69,12 @@ pub const Vertex = struct {
             .name = "tex_coord",
             .decoration = .{ .location = 0 },
         });
-        _ = color;
+        const frag_color = @extern(*addrspace(.output) V4, .{
+            .name = "frag_color",
+            .decoration = .{ .location = 1 },
+        });
+
+        frag_color.* = color;
 
         tex_coord.* = in_tex_coord;
         const pos_offset = pos;
@@ -80,26 +85,26 @@ pub const Vertex = struct {
 };
 
 const Fragment = struct {
-    const frag_color = @extern(*addrspace(.input) V3, .{
-        .name = "frag_color",
-        .decoration = .{ .location = 0 },
-    });
-    const frag_pos = @extern(*addrspace(.input) V2, .{
-        .name = "frag_pos",
-        .decoration = .{ .location = 1 },
-    });
-    const center = @extern(*addrspace(.input) V2, .{
-        .name = "center",
-        .decoration = .{ .location = 2 },
-    });
+    fn particle_quad() callconv(.{ .spirv_fragment = .{ .depth_assumption = .greater } }) void {
+        const frag_color = @extern(*addrspace(.input) V3, .{
+            .name = "frag_color",
+            .decoration = .{ .location = 0 },
+        });
+        const frag_pos = @extern(*addrspace(.input) V2, .{
+            .name = "frag_pos",
+            .decoration = .{ .location = 1 },
+        });
+        const center = @extern(*addrspace(.input) V2, .{
+            .name = "center",
+            .decoration = .{ .location = 2 },
+        });
 
-    const out_color = @extern(*addrspace(.output) V4, .{
-        .name = "out_color",
-        .decoration = .{ .location = 0 },
-    });
+        const out_color = @extern(*addrspace(.output) V4, .{
+            .name = "out_color",
+            .decoration = .{ .location = 0 },
+        });
 
-    fn main() callconv(.{ .spirv_fragment = .{ .depth_assumption = .greater } }) void {
-        const constant = @extern(*addrspace(.push_constant) driver.Push_Constant, .{.name = "push_constant"}).*;
+        const constant = @extern(*addrspace(.push_constant) driver.Particle_Constant, .{.name = "push_constant"}).*;
         const d = len(frag_pos.*-center.*);
 
         const glow_radius = PARTICLE_SIZE/2.0 * constant.camera.zoom;
@@ -143,11 +148,21 @@ const Fragment = struct {
     }
 
 
-    fn hdr() callconv(.{ .spirv_fragment = .{ .depth_assumption = .greater } }) void {
+    fn triangle() callconv(.{ .spirv_fragment = .{ .depth_assumption = .greater } }) void {
         const tex_coord = @extern(*addrspace(.input) V2, .{
             .name = "tex_coord",
             .decoration = .{ .location = 0 },
         }).*;
+        const frag_color = @extern(*addrspace(.input) V4, .{
+            .name = "frag_color",
+            .decoration = .{ .location = 1 },
+        }).*;
+
+        const out_color = @extern(*addrspace(.output) V4, .{
+            .name = "out_color",
+            .decoration = .{ .location = 0 },
+        });
+
         const sampled_image = @extern(*addrspace(.constant) const SampledImage, .{
             .name = "sampled_image",
             .decoration = .{
@@ -157,20 +172,24 @@ const Fragment = struct {
                 },
             },
         });
+        const constant = @extern(*addrspace(.push_constant) vulkan.Triangle_Constant, .{.name = "push_constant"});
 
-        const hdr_color_a = spirv.imageSampleImplicitLod(sampled_image, tex_coord);
+        if (constant.pure_color) {
+            out_color.* = frag_color;
+            return;
+        }
+        const hdr_color_a = frag_color * spirv.imageSampleImplicitLod(sampled_image, tex_coord);
         const hdr_color = V3 {hdr_color_a[0], hdr_color_a[1], hdr_color_a[2]};
-        var mapped = simple_tm(hdr_color);
+        const mapped = simple_tm(hdr_color);
         // const gamma = 2.2;
         // inline for (0..3) |i|
         //     mapped[i] = std.math.pow(f32, mapped[i], 1.0 / gamma);
-        if (mapped[0] > 1) mapped[0] = 0;
         out_color.* = .{mapped[0],mapped[1],mapped[2], hdr_color_a[3]};
     }
 };
 
 pub const Compute = struct {
-    const constant = @extern(*addrspace(.push_constant) driver.Push_Constant, .{.name = "push_constant"});
+    const constant = @extern(*addrspace(.push_constant) driver.Particle_Constant, .{.name = "push_constant"});
 
     pub fn linear_force(cfg: Force_Config, d: f32) f32 {
         const radius = cfg.radius;
@@ -217,6 +236,11 @@ pub const Compute = struct {
         .name = "grid_offsets",
         .decoration = .{ .descriptor = .{ .set = 0, .binding = 2 } },
     });
+    const grid_offsets_prefix = @extern(*addrspace(.storage_buffer) U32_Array , .{
+        .name = "grid_offsets_prefix",
+        .decoration = .{ .descriptor = .{ .set = 0, .binding = 3 } },
+    });
+
 
     pub fn main() callconv(.{ .spirv_kernel = .{.x=driver.KERNEL_WORKGROUP_X,.y=1,.z=1}}) void {
         const dt = 1.0/60.0;
@@ -275,22 +299,45 @@ pub const Compute = struct {
     }
 
     pub fn compute_grid_offsets() callconv(.{ .spirv_kernel = .{.x=driver.KERNEL_WORKGROUP_X,.y=1,.z=1}}) void {
-        // const i = spirv.global_invocation_id[0];
-        // const particle = particles_in.ptr[i];
-        // const cell = cell_from_pos(particle.pos);
-        // const bin = bin_from_cell(cell);
+        const i = spirv.global_invocation_id[0];
+        if (i >= particles_in.ptr.len) return;
+        const particle = particles_in.ptr[i];
+        const cell = cell_from_pos(particle.pos);
+        const bin = bin_from_cell(cell);
 
+        // note: not yet supported in zig compiler
         // _ = @atomicRmw(u32, &grid_offsets.ptr[bin], .Add, 1, .monotonic);
+        const sem = spirv.MemorySemantics {
+        };
+        _ = asm volatile (
+            \\%ret = OpAtomicIAdd %t %ptr %scope %sem %val
+            : [ret] "" (-> u32)
+            : [t] "t" (u32),
+              [ptr] "" (&grid_offsets.ptr[bin]),
+              [scope] "" (@as(u32, @intFromEnum(spirv.Scope.device))),
+              [sem] "" (@as(u32, @bitCast(sem))),
+              [val] "i" (1),
+        );
+    }
+
+    // TODO: parallelize this?
+    pub fn compute_offset_prefix() callconv(.{ .spirv_kernel = .{.x=1,.y=1,.z=1}}) void {
+        var sum: u32 = 0;
+        for (0..grid_offsets.ptr.len) |i| {
+            grid_offsets_prefix.ptr[i] = sum;
+            sum += grid_offsets.ptr[i];
+        }
     }
 };
 
 comptime {
-    @export(&Vertex.main,   .{ .name = "vert" });
-    @export(&Vertex.hdr,   .{ .name = "vert_hdr" });
-    @export(&Fragment.main, .{ .name = "frag" });
-    @export(&Fragment.hdr, .{ .name = "frag_hdr" });
+    @export(&Vertex.particle_quad,   .{ .name = "vert" });
+    @export(&Vertex.triangle,   .{ .name = "vert_hdr" });
+    @export(&Fragment.particle_quad, .{ .name = "frag" });
+    @export(&Fragment.triangle, .{ .name = "frag_hdr" });
     @export(&Compute.main,  .{ .name = "compute" });
     @export(&Compute.compute_grid_offsets, .{ .name = "compute_grid_offsets"});
+    @export(&Compute.compute_offset_prefix, .{ .name = "compute_offset_prefix"});
 }
 
 const V2 = @Vector(2, f32);
@@ -300,6 +347,7 @@ const V4 = @Vector(4, f32);
 const std = @import("std");
 const spirv = std.spirv;
 const driver = @import("main.zig");
+const vulkan = @import("vulkan.zig");
 
 const Particle = driver.Particle;
 const Force_Config = driver.Force_Config;

@@ -71,7 +71,7 @@ pub const Camera = extern struct {
     zoom: f32 = 1,
 };
 
-pub const Push_Constant = extern struct {
+pub const Particle_Constant = extern struct {
     camera: Camera,
 
     ping_pong: bool,
@@ -131,8 +131,13 @@ pub fn main(init: std.process.Init) !void {
     defer part_buf1.destroy();
     const part_buf2 = try vulkan.create_storage_buffer(particles_size, true);
     defer part_buf2.destroy();
-    const grid_offsets_buf = try vulkan.create_storage_buffer(GRID_CELL_COUNT * @sizeOf(u32), false); // no need to initialzied
+    const grid_offsets_buf = try vulkan.create_buffer(
+        GRID_CELL_COUNT * @sizeOf(u32), .{ .storage_buffer = true, .transfer_src = true, .transfer_dst = true }, .{ .device_local = true });
     defer grid_offsets_buf.destroy();
+
+    const grid_offsets_prefix_buf = try vulkan.create_buffer(
+        (GRID_CELL_COUNT+1) * @sizeOf(u32), .{ .storage_buffer = true, .transfer_src = true, .transfer_dst = true }, .{ .device_local = true });
+    defer grid_offsets_prefix_buf.destroy();
 
     const staging_buf = try vulkan.create_staging_buffer(particles_size);
     defer staging_buf.destroy();
@@ -144,9 +149,9 @@ pub fn main(init: std.process.Init) !void {
     try vulkan.copy_buffer(part_buf1, staging_buf, particles_size);
     try vulkan.copy_buffer(part_buf2, staging_buf, particles_size);
 
-    try vulkan.init_particle_desc_set(.{part_buf1.buf, part_buf2.buf}, grid_offsets_buf.buf);
+    try vulkan.init_particle_desc_set(.{part_buf1.buf, part_buf2.buf}, grid_offsets_buf.buf, grid_offsets_prefix_buf.buf);
     try vulkan.init_triangle_desc_set();
-    try vulkan.init_pipeline_layout(@sizeOf(Push_Constant));
+    try vulkan.init_pipeline_layout(@sizeOf(Particle_Constant));
     try vulkan.init_pipeline();
     try vulkan.init_off_screen_pipeline();
     try vulkan.init_compute_pipeline();
@@ -154,6 +159,8 @@ pub fn main(init: std.process.Init) !void {
 
     try vulkan.init_command_buffers(device);
     try vulkan.init_sync_primitives(device);
+    vulkan.write_texture_to_descriptor(0, vulkan.state.hdr_image_view);
+    vulkan.write_texture_to_descriptor(1, vulkan.state.hdr_image_view);
 
     const target_fps = 60.0;
     const target_dt  = 1.0/target_fps;
@@ -190,10 +197,10 @@ pub fn main(init: std.process.Init) !void {
             camera_target.pos[0] -= CAMERA_MOV_SPD * dt;
         }
         if (r.RGFW_isKeyDown(r.RGFW_keyW) == 1) {
-            camera_target.pos[1] += CAMERA_MOV_SPD * dt;
+            camera_target.pos[1] -= CAMERA_MOV_SPD * dt;
         }
         if (r.RGFW_isKeyDown(r.RGFW_keyS) == 1) {
-            camera_target.pos[1] -= CAMERA_MOV_SPD * dt;
+            camera_target.pos[1] += CAMERA_MOV_SPD * dt;
         }
 
         if (r.RGFW_isKeyPressed(r.RGFW_keyR) == 1) {
@@ -213,14 +220,47 @@ pub fn main(init: std.process.Init) !void {
         camera.pos[0] = exp_smooth(camera.pos[0], camera_target.pos[0], dt * CAMERA_SMOOTH_SPD);
         camera.pos[1] = exp_smooth(camera.pos[1], camera_target.pos[1], dt * CAMERA_SMOOTH_SPD);
 
-        vulkan.Draw.rectangle(.screen, .{1,1,1,1});
+        // try vulkan.copy_buffer(staging_buf, grid_offsets_buf, @sizeOf(u32) * GRID_CELL_COUNT);
+        // const offsets = std.mem.bytesAsSlice(u32, std.mem.sliceAsBytes(staging_mapped));
+        // std.log.info("grid_offset[0]={}", .{offsets[0]});
 
-        vulkan.set_push_constant(Push_Constant, &.{
+        // try vulkan.copy_buffer(staging_buf, grid_offsets_prefix_buf, @sizeOf(u32) * (GRID_CELL_COUNT + 1));
+        // std.log.info("grid_offset_prefix[1]={}", .{offsets[1]});
+        const particle_constant = Particle_Constant {
             .camera = camera, .species = species, .specie_ct = specie_ct, .particle_ct = particles.len,
-            .collision_cfg = collision_cfg, .particle_force_configs = particle_force_configs, .ping_pong = ping_pong });
-        try vulkan.dispatch_compute((particles.len+KERNEL_WORKGROUP_X-1)/KERNEL_WORKGROUP_X, 0);
-        // try vulkan.dispatch_compute((particles.len+KERNEL_WORKGROUP_X-1)/KERNEL_WORKGROUP_X, 1);
-        try vulkan.draw_frame(@intCast(particles.len * VERT_PER_PARTICLE));
+            .collision_cfg = collision_cfg, .particle_force_configs = particle_force_configs, .ping_pong = ping_pong };
+        {
+            try vulkan.compute_fence();
+            try vulkan.begin_dispatch();
+
+            vulkan.push_constant(Particle_Constant, &particle_constant);
+
+            vulkan.clear_buf(grid_offsets_buf);
+            vulkan.clear_buf(grid_offsets_prefix_buf);
+            vulkan.use_compute(0);
+            vulkan.dispatch_compute((particles.len+KERNEL_WORKGROUP_X-1)/KERNEL_WORKGROUP_X);
+            vulkan.sync_buf(grid_offsets_buf);
+
+            vulkan.use_compute(1);
+            vulkan.dispatch_compute(1);
+            vulkan.sync_buf(grid_offsets_prefix_buf);
+
+            vulkan.use_compute(2);
+            vulkan.dispatch_compute((particles.len+KERNEL_WORKGROUP_X-1)/KERNEL_WORKGROUP_X);
+
+            try vulkan.end_dispatch();
+        }
+        try vulkan.begin_draw();
+
+        vulkan.push_constant(Particle_Constant, &particle_constant);
+        vulkan.draw_particles_to_off_screen(@intCast(particles.len * VERT_PER_PARTICLE));
+
+        vulkan.begin_2d();
+        vulkan.Draw.rectangle(.screen, .{1,1,1,1}, vulkan.state.hdr_image_view);
+        vulkan.Draw.rectangle(.{.pos = .{-1,-1}, .size = .{1,1}}, .{1,1,1,1}, null);
+        vulkan.end_2d();
+
+        try vulkan.end_draw();
         ping_pong = !ping_pong;
     }
     try device.deviceWaitIdle();
