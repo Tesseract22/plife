@@ -501,7 +501,7 @@ pub fn cleanup() void {
 }
 
 
-const v = @import("vk.zig");
+const v = @import("thirdparty/vk.zig");
 const r = @import("RGFW");
 const m = @import("math.zig");
 

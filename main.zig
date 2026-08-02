@@ -316,12 +316,8 @@ pub fn main(init: std.process.Init) !void {
 }
 
 const vulkan = @import("vulkan.zig");
-const v = @import("vk.zig");
 const r = @import("RGFW");
 const m = @import("math.zig");
-
-const Instance = v.InstanceProxy;
-const Device = v.DeviceProxy;
 
 const std = @import("std");
 const log = std.log;
@@ -358,8 +354,3 @@ pub fn get_mouse(win: *r.RGFW_window) V2 {
     _ = r.RGFW_window_getMouse(win, &x, &y);
     return .{@floatFromInt(x), @floatFromInt(y)};
 }
-
-const vkGetInstanceProcAddr = @extern(v.PfnGetInstanceProcAddr, .{
-    .name = "vkGetInstanceProcAddr",
-    .library_name = "vulkan-1",
-});

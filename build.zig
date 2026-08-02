@@ -20,7 +20,6 @@ pub fn build(b: *std.Build) void {
         .root_source_file = compile_shader(b, spirv_target, optimize, b.path("shader.zig"), "shader.spv"),
     });
 
-
     const vulkan_path = b.graph.cwdRelativePath("C:/VulkanSDK/1.4.350.0/");
     const vulkan_include = vulkan_path.path(b, "Include/");
     const vulkan_lib = vulkan_path.path(b, "Lib");
