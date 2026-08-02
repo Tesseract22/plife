@@ -66,7 +66,7 @@ fn compile_shader(
             .root_source_file = src,
             .target = spirv_target,
             .optimize = optimize,
-        }),
+        })
     });
     b.installArtifact(exe);
     return exe.getEmittedBin();

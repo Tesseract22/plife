@@ -279,9 +279,6 @@ pub const Compute = struct {
         var pos = particles_in.ptr[i].pos;
 
         // spd = spd + compute_interaction_with_range(i, 0, particles_in.ptr.len) * m.splat2(dt);
-        switch (constant.method) {
-            .grid => {
-                @branchHint(.likely);
                 const cell = m.cell_from_pos(pos).?;
                 const cell_i: @Vector(2, f32) = .{@floatFromInt(cell[0]), @floatFromInt(cell[1])};
                 var x: f32 = -1;
@@ -299,15 +296,6 @@ pub const Compute = struct {
                 // for (0..grid_offsets.ptr.len) |bin| {
                 //     spd = spd + compute_interaction_with_bin(i, bin) * m.splat2(dt);
                 // }
-            },
-            .brute => {
-                for (0..particles_in.ptr.len) |j| {
-                    if (i == j) continue;
-                    spd = spd + compute_interaction(particles_in.ptr[i], particles_in.ptr[j]) * m.splat2(dt);
-                }
-            },
-            .none => {},
-        }
 
         // const bin = m.bin_from_cell(cell);
         pos = pos + m.splat2(dt) * spd;

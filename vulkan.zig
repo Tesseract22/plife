@@ -991,7 +991,7 @@ pub fn init_pipeline() !void {
         .render_pass       = state.render_pass,
         .layout            = state.triangle_pl_layout,
     });
-    const MAX_VERT_LEN = 256;
+    const MAX_VERT_LEN = 1024;
     for (&state.graphics_vert_bufs, &state.graphics_vert_maps) |*buf, *map| {
         buf.* = try create_buffer(
             MAX_VERT_LEN*@sizeOf(Vertex_Data),

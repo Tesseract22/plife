@@ -1,7 +1,7 @@
-pub const KERNEL_WORKGROUP_X = 128;
+pub const KERNEL_WORKGROUP_X = 64;
 pub const MAX_PARTICLE_SPECIE = 4;
 
-pub const GRID_CELL_SIDE_COUNT = 10;
+pub const GRID_CELL_SIDE_COUNT = 20;
 pub const GRID_CELL_COUNT      = GRID_CELL_SIDE_COUNT * GRID_CELL_SIDE_COUNT;
 pub const GRID_CELL_SIZE       = 2.0/@as(comptime_float, GRID_CELL_SIDE_COUNT);
 
@@ -41,10 +41,14 @@ pub fn generate_particle(particles: []Particle, specie_count: usize, rand: std.R
 }
 
 const particle_drag = 20;
-var r_force_radius_max: f32 = 0.099;
-var r_force_radius_min: f32 = 0.05;
-var r_force_strength_max: f32 = 0.20;
-var r_force_strength_min: f32 = 0.05;
+const r_force_radius_max: f32 = 0.099;
+const r_force_radius_min: f32 = 0.05;
+const r_force_strength_max: f32 = 0.20;
+const r_force_strength_min: f32 = 0.05;
+
+comptime {
+    assert(r_force_radius_min < GRID_CELL_SIZE);
+}
 
 fn random_sign(random: std.Random) f32 {
     return if (random.boolean()) 1 else -1;
@@ -86,7 +90,7 @@ pub fn main(init: std.process.Init) !void {
     var rand_backend = std.Random.Xoroshiro128.init(@intCast(std.Io.Timestamp.now(io, .boot).nanoseconds));
     const rand = rand_backend.random();
 
-    var   particles  : [60000]Particle = undefined;
+    var   particles  : [80000]Particle = undefined;
     var   species    : [MAX_PARTICLE_SPECIE]Particle_Specie = undefined;
     const specie_ct  : u32 = 3;
     var   particle_force_configs : [MAX_PARTICLE_SPECIE*MAX_PARTICLE_SPECIE]Force_Config = undefined;

@@ -23,27 +23,27 @@ pub fn rgb_from_hsv(hsv: [3]f32) [3]f32 {
     };
 }
 
-pub fn dist2(a: V2, b: V2) f32 {
+pub inline fn dist2(a: V2, b: V2) f32 {
     return len2(a-b);
 }
 
-pub fn len(a: V2) f32 {
+pub inline fn len(a: V2) f32 {
     return @sqrt(len2(a));
 }
 
-pub fn len2(a: V2) f32 {
+pub inline fn len2(a: V2) f32 {
     return @reduce(.Add, a*a);
 }
 
-pub fn normalize(a: V2) V2 {
+pub inline fn normalize(a: V2) V2 {
     return a / splat2(len(a));
 }
 
-pub fn splat2(a: f32) V2 {
+pub inline fn splat2(a: f32) V2 {
     return @splat(a);
 }
 
-pub fn splat3(a: f32) V3 {
+pub inline fn splat3(a: f32) V3 {
     return @splat(a);
 }
 
@@ -65,12 +65,12 @@ pub fn cell_from_normalized_pos(pos_normalized: V2) ?@Vector(2, u32) {
     };
 
 }
-pub fn cell_from_pos(pos: V2) ?@Vector(2, u32) {
+pub inline fn cell_from_pos(pos: V2) ?@Vector(2, u32) {
     const pos_normalized = (pos + splat2(1)) / splat2(2); // this is now from 0-1
     return cell_from_normalized_pos(pos_normalized);
 }
 
-pub fn bin_from_cell(coord: [2]u32) u32 {
+pub inline fn bin_from_cell(coord: [2]u32) u32 {
     return coord[1] * GRID_CELL_SIDE_COUNT + coord[0];
 }
 
