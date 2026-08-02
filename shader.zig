@@ -223,6 +223,24 @@ pub const Compute = struct {
 
     }
 
+    pub fn compute_interaction_with_bin(particle_i: u32, bin: u32) V2 {
+        const start = grid_offsets_prefix.ptr[bin];
+        const end   = grid_offsets_prefix.ptr[bin+1];
+        return compute_interaction_with_range(particle_i, start, end);
+    }
+
+    pub fn compute_interaction_with_range(particle_i: u32, start: u32, end: u32) V2 {
+        var spd = m.splat2(0);
+        for (start..end) |j| {
+            const particle_j = particles_sorted.ptr[j];
+            if (particle_i == particle_j) continue;
+            const a = particles_in.ptr[particle_i];
+            const b = particles_in.ptr[particle_j];
+            spd += compute_interaction(a, b);
+        }
+        return spd;
+    }
+
     // TODO: make this configurable from CPU
     const PARTICLE_DRAG = 20;
     const boundary_mode: enum { clamp, wrap } = .wrap;
@@ -243,7 +261,14 @@ pub const Compute = struct {
         .name = "grid_offsets_prefix",
         .decoration = .{ .descriptor = .{ .set = 0, .binding = 3 } },
     });
-
+    const grid_offsets_prefix_copy = @extern(*addrspace(.storage_buffer) U32_Array , .{
+        .name = "grid_offsets_prefix_copy",
+        .decoration = .{ .descriptor = .{ .set = 0, .binding = 4 } },
+    });
+    const particles_sorted = @extern(*addrspace(.storage_buffer) U32_Array , .{
+        .name = "particles_sorted",
+        .decoration = .{ .descriptor = .{ .set = 0, .binding = 5 } },
+    });
 
     pub fn main() callconv(.{ .spirv_kernel = .{.x=driver.KERNEL_WORKGROUP_X,.y=1,.z=1}}) void {
         const dt = 1.0/60.0;
@@ -252,10 +277,39 @@ pub const Compute = struct {
 
         var spd = particles_in.ptr[i].spd;
         var pos = particles_in.ptr[i].pos;
-        for (0..particles_in.ptr.len) |j| {
-            if (i == j) continue;
-            spd = spd + compute_interaction(particles_in.ptr[i], particles_in.ptr[j]) * m.splat2(dt);
+
+        // spd = spd + compute_interaction_with_range(i, 0, particles_in.ptr.len) * m.splat2(dt);
+        switch (constant.method) {
+            .grid => {
+                @branchHint(.likely);
+                const cell = m.cell_from_pos(pos).?;
+                const cell_i: @Vector(2, f32) = .{@floatFromInt(cell[0]), @floatFromInt(cell[1])};
+                var x: f32 = -1;
+                while (x <= 1): (x += 1) {
+                    var y: f32 = -1;
+                    while (y <= 1): (y += 1) {
+                        const neighbor_i = @Vector(2, f32) {cell_i[0]+x, cell_i[1]+y};
+                        if (neighbor_i[0] >= driver.GRID_CELL_SIDE_COUNT or neighbor_i[0] < 0) continue; 
+                        if (neighbor_i[1] >= driver.GRID_CELL_SIDE_COUNT or neighbor_i[1] < 0) continue; 
+
+                        const bin = m.bin_from_cell(.{ @intFromFloat(neighbor_i[0]), @intFromFloat(neighbor_i[1]) });
+                        spd = spd + compute_interaction_with_bin(i, bin) * m.splat2(dt);
+                    }
+                }
+                // for (0..grid_offsets.ptr.len) |bin| {
+                //     spd = spd + compute_interaction_with_bin(i, bin) * m.splat2(dt);
+                // }
+            },
+            .brute => {
+                for (0..particles_in.ptr.len) |j| {
+                    if (i == j) continue;
+                    spd = spd + compute_interaction(particles_in.ptr[i], particles_in.ptr[j]) * m.splat2(dt);
+                }
+            },
+            .none => {},
         }
+
+        // const bin = m.bin_from_cell(cell);
         pos = pos + m.splat2(dt) * spd;
         spd = spd * m.splat2(@exp(-PARTICLE_DRAG*dt*m.len(spd)));
         switch (boundary_mode) {
@@ -294,8 +348,7 @@ pub const Compute = struct {
 
         // note: not yet supported in zig compiler
         // _ = @atomicRmw(u32, &grid_offsets.ptr[bin], .Add, 1, .monotonic);
-        const sem = spirv.MemorySemantics {
-        };
+        const sem = spirv.MemorySemantics {};
         _ = asm volatile (
             \\%ret = OpAtomicIAdd %t %ptr %scope %sem %val
             : [ret] "" (-> u32)
@@ -312,8 +365,31 @@ pub const Compute = struct {
         var sum: u32 = 0;
         for (0..grid_offsets.ptr.len) |i| {
             grid_offsets_prefix.ptr[i] = sum;
+            grid_offsets_prefix_copy.ptr[i] = sum;
             sum += grid_offsets.ptr[i];
         }
+        grid_offsets_prefix.ptr[grid_offsets_prefix.ptr.len-1] = sum;
+        grid_offsets_prefix_copy.ptr[grid_offsets_prefix.ptr.len-1] = sum;
+    }
+
+    pub fn sort_particles() callconv(.{ .spirv_kernel = .{.x=driver.KERNEL_WORKGROUP_X,.y=1,.z=1}}) void {
+        const i = spirv.global_invocation_id[0];
+        if (i >= particles_in.ptr.len) return;
+        const particle = particles_in.ptr[i];
+        const cell = m.cell_from_pos(particle.pos).?;
+        const bin = m.bin_from_cell(cell);
+
+        const sem = spirv.MemorySemantics {};
+        const offset = asm volatile (
+            \\%ret = OpAtomicIAdd %t %ptr %scope %sem %val
+            : [ret] "" (-> u32)
+            : [t] "t" (u32),
+            [ptr] "" (&grid_offsets_prefix_copy.ptr[bin]),
+            [scope] "" (@as(u32, @intFromEnum(spirv.Scope.device))),
+            [sem] "" (@as(u32, @bitCast(sem))),
+            [val] "i" (1),
+        );
+        particles_sorted.ptr[offset] = i;
     }
 };
 
@@ -325,6 +401,7 @@ comptime {
     @export(&Compute.main,  .{ .name = "compute" });
     @export(&Compute.compute_grid_offsets, .{ .name = "compute_grid_offsets"});
     @export(&Compute.compute_offset_prefix, .{ .name = "compute_offset_prefix"});
+    @export(&Compute.sort_particles, .{ .name = "sort_particles"});
 }
 
 const V2 = @Vector(2, f32);

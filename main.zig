@@ -66,6 +66,8 @@ pub fn randomize_config(particle_force_configs: []Force_Config, specie_ct: u32, 
     }
 }
 
+pub const Method = enum(u32) { none, brute, grid };
+
 pub const Particle_Constant = extern struct {
     camera: Camera,
 
@@ -75,6 +77,7 @@ pub const Particle_Constant = extern struct {
     particle_ct: u32,
     collision_cfg: Force_Config,
     particle_force_configs: [MAX_PARTICLE_SPECIE*MAX_PARTICLE_SPECIE]Force_Config,
+    method: Method,
 };
 
 pub fn main(init: std.process.Init) !void {
@@ -83,7 +86,7 @@ pub fn main(init: std.process.Init) !void {
     var rand_backend = std.Random.Xoroshiro128.init(@intCast(std.Io.Timestamp.now(io, .boot).nanoseconds));
     const rand = rand_backend.random();
 
-    var   particles  : [100]Particle = undefined;
+    var   particles  : [60000]Particle = undefined;
     var   species    : [MAX_PARTICLE_SPECIE]Particle_Specie = undefined;
     const specie_ct  : u32 = 3;
     var   particle_force_configs : [MAX_PARTICLE_SPECIE*MAX_PARTICLE_SPECIE]Force_Config = undefined;
@@ -91,7 +94,6 @@ pub fn main(init: std.process.Init) !void {
         .radius = 0.025,
         .strength = 0.6,
     };
-
 
     const particles_size = @sizeOf(Particle) * particles.len;
     randomize_particle_specie(&species, rand);
@@ -134,6 +136,13 @@ pub fn main(init: std.process.Init) !void {
         (GRID_CELL_COUNT+1) * @sizeOf(u32), .{ .storage_buffer = true, .transfer_src = true, .transfer_dst = true }, .{ .device_local = true });
     defer grid_offsets_prefix_buf.destroy();
 
+    const grid_offsets_prefix_copy_buf = try vulkan.create_buffer(
+        (GRID_CELL_COUNT+1) * @sizeOf(u32), .{ .storage_buffer = true, .transfer_src = true, .transfer_dst = true }, .{ .device_local = true });
+    defer grid_offsets_prefix_copy_buf.destroy();
+
+    const part_sorted_buf = try vulkan.create_storage_buffer(particles_size, true);
+    defer part_sorted_buf.destroy();
+
     const staging_buf = try vulkan.create_staging_buffer(particles_size);
     defer staging_buf.destroy();
 
@@ -144,7 +153,10 @@ pub fn main(init: std.process.Init) !void {
     try vulkan.copy_buffer(part_buf1, staging_buf, particles_size);
     try vulkan.copy_buffer(part_buf2, staging_buf, particles_size);
 
-    try vulkan.init_particle_desc_set(.{part_buf1.buf, part_buf2.buf}, grid_offsets_buf.buf, grid_offsets_prefix_buf.buf);
+    try vulkan.init_particle_desc_set(
+        .{part_buf1.buf, part_buf2.buf},
+        grid_offsets_buf.buf, grid_offsets_prefix_buf.buf, grid_offsets_prefix_copy_buf.buf,
+        part_sorted_buf.buf);
     try vulkan.init_triangle_desc_set();
     try vulkan.init_pipeline_layout(@sizeOf(Particle_Constant));
     try vulkan.init_pipeline();
@@ -166,6 +178,7 @@ pub fn main(init: std.process.Init) !void {
 
     var ping_pong = true;
     var display_gui = true;
+    var method = Method.grid;
     while (r.RGFW_window_shouldClose(window) == 0) {
         // TODO: limit frame rate
         const start = std.Io.Timestamp.now(io, .boot);
@@ -201,6 +214,9 @@ pub fn main(init: std.process.Init) !void {
         if (r.RGFW_isKeyPressed(r.RGFW_keyG) == 1) {
             display_gui = !display_gui;
         }
+        if (r.RGFW_isKeyPressed(r.RGFW_keyM) == 1) {
+            method = @enumFromInt((@intFromEnum(method) + 1) % 3);
+        }
 
         if (r.RGFW_isKeyPressed(r.RGFW_keyR) == 1) {
             randomize_particle_specie(&species, rand);
@@ -223,13 +239,15 @@ pub fn main(init: std.process.Init) !void {
         const mouse = (mouse_screen / V2 {WINDOW_W, WINDOW_H})*m.splat2(2) - m.splat2(1);
 
         try vulkan.copy_buffer(staging_buf, grid_offsets_buf, @sizeOf(u32) * GRID_CELL_COUNT);
-        const offsets = std.mem.bytesAsSlice(u32, std.mem.sliceAsBytes(staging_mapped));
+        // const offsets = std.mem.bytesAsSlice(u32, std.mem.sliceAsBytes(staging_mapped));
 
         // try vulkan.copy_buffer(staging_buf, grid_offsets_prefix_buf, @sizeOf(u32) * (GRID_CELL_COUNT + 1));
         // std.log.info("grid_offset_prefix[1]={}", .{offsets[1]});
         const particle_constant = Particle_Constant {
             .camera = camera, .species = species, .specie_ct = specie_ct, .particle_ct = particles.len,
-            .collision_cfg = collision_cfg, .particle_force_configs = particle_force_configs, .ping_pong = ping_pong };
+            .collision_cfg = collision_cfg, .particle_force_configs = particle_force_configs, .ping_pong = ping_pong,
+            .method = method,
+        };
         {
             try vulkan.compute_fence();
             try vulkan.begin_dispatch();
@@ -238,6 +256,7 @@ pub fn main(init: std.process.Init) !void {
 
             vulkan.clear_buf(grid_offsets_buf);
             vulkan.clear_buf(grid_offsets_prefix_buf);
+            vulkan.clear_buf(grid_offsets_prefix_copy_buf);
             vulkan.use_compute(0);
             vulkan.dispatch_compute((particles.len+KERNEL_WORKGROUP_X-1)/KERNEL_WORKGROUP_X);
             vulkan.sync_buf(grid_offsets_buf);
@@ -245,8 +264,13 @@ pub fn main(init: std.process.Init) !void {
             vulkan.use_compute(1);
             vulkan.dispatch_compute(1);
             vulkan.sync_buf(grid_offsets_prefix_buf);
+            vulkan.sync_buf(grid_offsets_prefix_copy_buf);
 
             vulkan.use_compute(2);
+            vulkan.dispatch_compute((particles.len+KERNEL_WORKGROUP_X-1)/KERNEL_WORKGROUP_X);
+            vulkan.sync_buf(part_sorted_buf);
+
+            vulkan.use_compute(3);
             vulkan.dispatch_compute((particles.len+KERNEL_WORKGROUP_X-1)/KERNEL_WORKGROUP_X);
 
             try vulkan.end_dispatch();
@@ -271,8 +295,8 @@ pub fn main(init: std.process.Init) !void {
                 // log.info("camera mouse={}, cell={}", .{camera_mouse, cell});
                 const pos = m.splat2(GRID_CELL_SIZE)*@as(V2, @floatFromInt(cell)) + m.splat2(-1);
                 vulkan.Draw.rectangle(.{.pos = pos, .size = m.splat2(GRID_CELL_SIZE) }, .{1,0,0,0.2}, null);
-                const bin = m.bin_from_cell(cell);
-                log.info("cell: {}, bin: {}, count: {}", .{ cell, bin, offsets[bin] });
+                // const bin = m.bin_from_cell(cell);
+                // log.info("cell: {}, bin: {}, count: {}", .{ cell, bin, offsets[bin] });
             }
             vulkan.end_camera();
         }

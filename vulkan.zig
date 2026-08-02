@@ -1,7 +1,7 @@
 const Vulkan = @This();
 const HDR_FORMAT = v.Format.r16g16b16a16_sfloat;
 pub const MAX_FRAMES_IN_FLIGHT = 2;
-pub const COMPUTE_STAGE_COUNT  = 3;
+pub const COMPUTE_STAGE_COUNT  = 4;
 vkb: v.BaseWrapper = undefined,
 instance_handle   : v.Instance = .null_handle,
 instance_wrapper  : v.InstanceWrapper = undefined,
@@ -58,7 +58,7 @@ graphics_pipeline     : v.Pipeline = .null_handle,
 graphics_vert_bufs    : [MAX_FRAMES_IN_FLIGHT]Buffer = .{.null, .null},
 graphics_vert_maps    : [MAX_FRAMES_IN_FLIGHT][]Vertex_Data = undefined,
 off_screen_graphics_pipeline : v.Pipeline = .null_handle,
-compute_pipelines     : [COMPUTE_STAGE_COUNT]v.Pipeline = .{.null_handle, .null_handle, .null_handle},
+compute_pipelines     : [COMPUTE_STAGE_COUNT]v.Pipeline = .{.null_handle, .null_handle, .null_handle, .null_handle},
 
 command_pool               : v.CommandPool = .null_handle,
 graphics_command_buffers   : [MAX_FRAMES_IN_FLIGHT]v.CommandBuffer = undefined,
@@ -643,7 +643,11 @@ pub fn write_texture_to_descriptor(curr_frame: u32, texture: v.ImageView) void {
 }
 
 // Descriptor Set describes how storage buffer etc. is accessed in shaders
-pub fn init_particle_desc_set(ping_pong: [MAX_FRAMES_IN_FLIGHT]v.Buffer, grid_offsets: v.Buffer, grid_offsets_prefix: v.Buffer) !void {
+pub fn init_particle_desc_set(
+    ping_pong: [MAX_FRAMES_IN_FLIGHT]v.Buffer,
+    grid_offsets: v.Buffer,
+    grid_offsets_prefix: v.Buffer, grid_offsets_prefix_copy: v.Buffer,
+    part_sorted: v.Buffer) !void {
     const device = state.device;
     const bindings = [_]v.DescriptorSetLayoutBinding{
         .{ // particles ping buffer
@@ -670,7 +674,18 @@ pub fn init_particle_desc_set(ping_pong: [MAX_FRAMES_IN_FLIGHT]v.Buffer, grid_of
             .descriptor_count = 1,
             .stage_flags = .{ .vertex  = true, .compute = true },
         },
-
+        .{ // grid offsets prefix buffer
+            .binding = 4,
+            .descriptor_type = .storage_buffer,
+            .descriptor_count = 1,
+            .stage_flags = .{ .vertex  = true, .compute = true },
+        },
+        .{ // particles sorted
+            .binding = 5,
+            .descriptor_type = .storage_buffer,
+            .descriptor_count = 1,
+            .stage_flags = .{ .vertex  = true, .compute = true },
+        },
     };
 
     state.particle_desc_set_layout = try state.device.createDescriptorSetLayout(&.{
@@ -679,6 +694,14 @@ pub fn init_particle_desc_set(ping_pong: [MAX_FRAMES_IN_FLIGHT]v.Buffer, grid_of
     }, null);
 
     const pool_sizes = [_]v.DescriptorPoolSize {
+        .{
+            .type = .storage_buffer,
+            .descriptor_count = 2,
+        },
+        .{
+            .type = .storage_buffer,
+            .descriptor_count = 2,
+        },
         .{
             .type = .storage_buffer,
             .descriptor_count = 2,
@@ -720,18 +743,18 @@ pub fn init_particle_desc_set(ping_pong: [MAX_FRAMES_IN_FLIGHT]v.Buffer, grid_of
         const ssbo_info = [_]v.DescriptorBufferInfo {.
             {
                 .buffer = ping_pong[i],
-                    .offset = 0,
-                    .range = v.WHOLE_SIZE,
+                .offset = 0,
+                .range = v.WHOLE_SIZE,
             },
             .{
                 .buffer = ping_pong[(i+1)%MAX_FRAMES_IN_FLIGHT],
-                    .offset = 0,
-                    .range = v.WHOLE_SIZE,
+                .offset = 0,
+                .range = v.WHOLE_SIZE,
             },
             .{
                 .buffer = grid_offsets,
-                    .offset = 0,
-                    .range = v.WHOLE_SIZE,
+                .offset = 0,
+                .range = v.WHOLE_SIZE,
             },
             .{
                 .buffer = grid_offsets_prefix,
@@ -739,6 +762,16 @@ pub fn init_particle_desc_set(ping_pong: [MAX_FRAMES_IN_FLIGHT]v.Buffer, grid_of
                     .range = v.WHOLE_SIZE,
             },
 
+            .{
+                .buffer = grid_offsets_prefix_copy,
+                    .offset = 0,
+                    .range = v.WHOLE_SIZE,
+            },
+            .{
+                .buffer = part_sorted,
+                .offset = 0,
+                .range = v.WHOLE_SIZE,
+            },
         };
         
         const writes = [_]v.WriteDescriptorSet {
@@ -995,6 +1028,11 @@ pub fn init_compute_pipeline() !void {
         .{
             .stage = .{ .compute = true },
             .module = state.shader,
+            .p_name = "sort_particles",
+        },
+        .{
+            .stage = .{ .compute = true },
+            .module = state.shader,
             .p_name = "compute",
         },
         
@@ -1013,6 +1051,11 @@ pub fn init_compute_pipeline() !void {
         .{
             .layout = state.particle_pl_layout,
             .stage  = compute_shader_infos[2],
+            .base_pipeline_index = -1,
+        },
+        .{
+            .layout = state.particle_pl_layout,
+            .stage  = compute_shader_infos[3],
             .base_pipeline_index = -1,
         }
     };
