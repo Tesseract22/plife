@@ -22,3 +22,58 @@ pub fn rgb_from_hsv(hsv: [3]f32) [3]f32 {
         else => unreachable,
     };
 }
+
+pub fn dist2(a: V2, b: V2) f32 {
+    return len2(a-b);
+}
+
+pub fn len(a: V2) f32 {
+    return @sqrt(len2(a));
+}
+
+pub fn len2(a: V2) f32 {
+    return @reduce(.Add, a*a);
+}
+
+pub fn normalize(a: V2) V2 {
+    return a / splat2(len(a));
+}
+
+pub fn splat2(a: f32) V2 {
+    return @splat(a);
+}
+
+pub fn splat3(a: f32) V3 {
+    return @splat(a);
+}
+
+const driver = @import("main.zig");
+const std = @import("std");
+pub const GRID_CELL_SIDE_COUNT = driver.GRID_CELL_SIDE_COUNT;
+pub const GRID_CELL_COUNT      = driver.GRID_CELL_COUNT;
+pub const GRID_CELL_SIZE       = driver.GRID_CELL_SIZE;
+
+pub fn cell_from_normalized_pos(pos_normalized: V2) ?@Vector(2, u32) {
+    for (@as([2]f32, pos_normalized)) |coord| {
+        if (coord < 0 or coord > 1) return null;
+    }
+    // `pos` could have 1 or -1 as coordinate, which would cause `bin_coord` to be EQUAL to GRID_CELL_SIDE_COUNT, making it out of bound
+    const cell_f = pos_normalized / splat2(GRID_CELL_SIZE/2.0);
+    return .{
+        std.math.clamp(@as(u32, @floor(cell_f[0])), 0, GRID_CELL_SIDE_COUNT-1),
+        std.math.clamp(@as(u32, @floor(cell_f[1])), 0, GRID_CELL_SIDE_COUNT-1),
+    };
+
+}
+pub fn cell_from_pos(pos: V2) ?@Vector(2, u32) {
+    const pos_normalized = (pos + splat2(1)) / splat2(2); // this is now from 0-1
+    return cell_from_normalized_pos(pos_normalized);
+}
+
+pub fn bin_from_cell(coord: [2]u32) u32 {
+    return coord[1] * GRID_CELL_SIDE_COUNT + coord[0];
+}
+
+const V2 = @Vector(2, f32);
+const V3 = @Vector(3, f32);
+const V4 = @Vector(4, f32);

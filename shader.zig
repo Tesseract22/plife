@@ -41,9 +41,8 @@ pub const Vertex = struct {
 
         const particle = if (constant.ping_pong) particles1.ptr[i] else particles2.ptr[i];
 
-        const zoom = splat2(camera.zoom);
-        center.* = (particle.pos + V2 {camera.pos[0],camera.pos[1]}) * zoom;
-        const pos_offset = center.* + (positions[off_i] * splat2(PARTICLE_SIZE)) * splat2(camera.zoom);
+        center.* = camera.translate(particle.pos);
+        const pos_offset = center.* + (positions[off_i] * m.splat2(PARTICLE_SIZE)) * m.splat2(camera.zoom);
         spirv.position_out.* = .{
             pos_offset[0], pos_offset[1], 0, 1
         };
@@ -74,10 +73,14 @@ pub const Vertex = struct {
             .decoration = .{ .location = 1 },
         });
 
+        const constant = @extern(*addrspace(.push_constant) vulkan.Triangle_Constant, .{.name = "push_constant"});
+
         frag_color.* = color;
 
         tex_coord.* = in_tex_coord;
-        const pos_offset = pos;
+        var cam = constant.camera;
+        cam.pos[1] = -cam.pos[1];
+        const pos_offset = cam.translate(pos);
         spirv.position_out.* = .{
             pos_offset[0], pos_offset[1], 0, 1
         };
@@ -105,7 +108,7 @@ const Fragment = struct {
         });
 
         const constant = @extern(*addrspace(.push_constant) driver.Particle_Constant, .{.name = "push_constant"}).*;
-        const d = len(frag_pos.*-center.*);
+        const d = m.len(frag_pos.*-center.*);
 
         const glow_radius = PARTICLE_SIZE/2.0 * constant.camera.zoom;
         const kernel_radius = PARTICLE_KERNEL_SIZE/2.0 * constant.camera.zoom;
@@ -129,22 +132,22 @@ const Fragment = struct {
     }
 
     fn simple_tm(hdrColor: V3) V3 {
-        return hdrColor / (hdrColor + splat3(1.0));
+        return hdrColor / (hdrColor + m.splat3(1.0));
     }
 
     // adapted from https://knarkowicz.wordpress.com/2016/01/06/aces-filmic-tone-mapping-curve/
     fn aces_tm(x: V3) V3 {
-        const a = splat3(2.51);
-        const b = splat3(0.03);
-        const c = splat3(2.43);
-        const d = splat3(0.59);
-        const e = splat3(0.14);
+        const a = m.splat3(2.51);
+        const b = m.splat3(0.03);
+        const c = m.splat3(2.43);
+        const d = m.splat3(0.59);
+        const e = m.splat3(0.14);
         return std.math.clamp((x*(a*x+b))/(x*(c*x+d)+e), 0.0, 1.0);
     }
 
     fn exposure_tm(hdrColor: V3) V3 {
-        const exposure = splat3(0.5);
-        return splat3(1.0) - @exp(-hdrColor * exposure);
+        const exposure = m.splat3(0.5);
+        return m.splat3(1.0) - @exp(-hdrColor * exposure);
     }
 
 
@@ -174,7 +177,7 @@ const Fragment = struct {
         });
         const constant = @extern(*addrspace(.push_constant) vulkan.Triangle_Constant, .{.name = "push_constant"});
 
-        if (constant.pure_color) {
+        if (constant.pure_color == 1) {
             out_color.* = frag_color;
             return;
         }
@@ -200,8 +203,8 @@ pub const Compute = struct {
 
     fn compute_interaction(a: Particle, b: Particle) V2 {
         const l = @as(V2, a.pos) - b.pos;
-        const d = len(l); // since we uses linear_force, zero distance does not cause infinite force
-        const unit_l = if (d == 0) .{1,0} else l / splat2(d);
+        const d = m.len(l); // since we uses linear_force, zero distance does not cause infinite force
+        const unit_l = if (d == 0) .{1,0} else l / m.splat2(d);
         // if (d > collision_max_dist) continue;
         const collision_force = linear_force(constant.collision_cfg, d);
 
@@ -215,8 +218,8 @@ pub const Compute = struct {
         //     b.pos -= random_unit * splat2(1e-3);
         // }
         return
-            splat2(interact_force_ab) * unit_l
-            + splat2(collision_force) * unit_l;
+            m.splat2(interact_force_ab) * unit_l
+            + m.splat2(collision_force) * unit_l;
 
     }
 
@@ -251,10 +254,10 @@ pub const Compute = struct {
         var pos = particles_in.ptr[i].pos;
         for (0..particles_in.ptr.len) |j| {
             if (i == j) continue;
-            spd = spd + compute_interaction(particles_in.ptr[i], particles_in.ptr[j]) * splat2(dt);
+            spd = spd + compute_interaction(particles_in.ptr[i], particles_in.ptr[j]) * m.splat2(dt);
         }
-        pos = pos + splat2(dt) * spd;
-        spd = spd * splat2(@exp(-PARTICLE_DRAG*dt*len(spd)));
+        pos = pos + m.splat2(dt) * spd;
+        spd = spd * m.splat2(@exp(-PARTICLE_DRAG*dt*m.len(spd)));
         switch (boundary_mode) {
             .clamp => {
                 if (pos[1] < -1) {
@@ -275,35 +278,19 @@ pub const Compute = struct {
                 }
             },
             .wrap => {
-                pos = @mod(pos + splat2(1), splat2(2)) - splat2(1);
+                pos = @mod(pos + m.splat2(1), m.splat2(2)) - m.splat2(1);
             },
         }
         particles_out.ptr[i].spd = spd;
         particles_out.ptr[i].pos = pos;
     }
 
-    pub const GRID_CELL_SIDE_COUNT = driver.GRID_CELL_SIDE_COUNT;
-    pub const GRID_CELL_COUNT      = driver.GRID_CELL_COUNT;
-    pub const GRID_CELL_SIZE       = driver.GRID_CELL_SIZE;
-
-
-    pub fn cell_from_pos(pos: V2) @Vector(2, u32) {
-        const x = std.math.clamp(pos[0], 0, 0.999999999);
-        const y = std.math.clamp(pos[1], 0, 0.999999999);
-        const bin_coord_f = V2{x,y} / splat2(GRID_CELL_SIZE);
-        return @floor(bin_coord_f);
-    }
-
-    pub fn bin_from_cell(coord: [2]u32) u32 {
-        return coord[1] * GRID_CELL_SIDE_COUNT + coord[0];
-    }
-
     pub fn compute_grid_offsets() callconv(.{ .spirv_kernel = .{.x=driver.KERNEL_WORKGROUP_X,.y=1,.z=1}}) void {
         const i = spirv.global_invocation_id[0];
         if (i >= particles_in.ptr.len) return;
         const particle = particles_in.ptr[i];
-        const cell = cell_from_pos(particle.pos);
-        const bin = bin_from_cell(cell);
+        const cell = m.cell_from_pos(particle.pos).?;
+        const bin = m.bin_from_cell(cell);
 
         // note: not yet supported in zig compiler
         // _ = @atomicRmw(u32, &grid_offsets.ptr[bin], .Add, 1, .monotonic);
@@ -347,6 +334,7 @@ const V4 = @Vector(4, f32);
 const std = @import("std");
 const spirv = std.spirv;
 const driver = @import("main.zig");
+const m = @import("math.zig");
 const vulkan = @import("vulkan.zig");
 
 const Particle = driver.Particle;
@@ -371,23 +359,3 @@ pub const SampledImage = @SpirvType(.{ .sampled_image = Image });
 
 const Particle_Array = SpirvArray(driver.Particle);
 const U32_Array      = SpirvArray(u32);
-
-pub fn dist2(a: V2, b: V2) f32 {
-    return len2(a-b);
-}
-
-pub fn len(a: V2) f32 {
-    return @sqrt(len2(a));
-}
-
-pub fn len2(a: V2) f32 {
-    return @reduce(.Add, a*a);
-}
-
-pub fn splat2(a: f32) V2 {
-    return @splat(a);
-}
-
-pub fn splat3(a: f32) V3 {
-    return @splat(a);
-}

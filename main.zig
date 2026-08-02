@@ -3,7 +3,7 @@ pub const MAX_PARTICLE_SPECIE = 4;
 
 pub const GRID_CELL_SIDE_COUNT = 10;
 pub const GRID_CELL_COUNT      = GRID_CELL_SIDE_COUNT * GRID_CELL_SIDE_COUNT;
-pub const GRID_CELL_SIZE       = 1.0/@as(comptime_float, GRID_CELL_SIDE_COUNT);
+pub const GRID_CELL_SIZE       = 2.0/@as(comptime_float, GRID_CELL_SIDE_COUNT);
 
 pub const Particle = extern struct {
     pos: [2]f32,
@@ -66,11 +66,6 @@ pub fn randomize_config(particle_force_configs: []Force_Config, specie_ct: u32, 
     }
 }
 
-pub const Camera = extern struct {
-    pos: [2]f32 = .{0,0},
-    zoom: f32 = 1,
-};
-
 pub const Particle_Constant = extern struct {
     camera: Camera,
 
@@ -88,7 +83,7 @@ pub fn main(init: std.process.Init) !void {
     var rand_backend = std.Random.Xoroshiro128.init(@intCast(std.Io.Timestamp.now(io, .boot).nanoseconds));
     const rand = rand_backend.random();
 
-    var   particles  : [40000]Particle = undefined;
+    var   particles  : [100]Particle = undefined;
     var   species    : [MAX_PARTICLE_SPECIE]Particle_Specie = undefined;
     const specie_ct  : u32 = 3;
     var   particle_force_configs : [MAX_PARTICLE_SPECIE*MAX_PARTICLE_SPECIE]Force_Config = undefined;
@@ -170,6 +165,7 @@ pub fn main(init: std.process.Init) !void {
     var camera_target = Camera {};
 
     var ping_pong = true;
+    var display_gui = true;
     while (r.RGFW_window_shouldClose(window) == 0) {
         // TODO: limit frame rate
         const start = std.Io.Timestamp.now(io, .boot);
@@ -191,16 +187,19 @@ pub fn main(init: std.process.Init) !void {
         r.RGFW_pollEvents();
 
         if (r.RGFW_isKeyDown(r.RGFW_keyA) == 1) {
-            camera_target.pos[0] += CAMERA_MOV_SPD * dt;
+            camera_target.pos[0] -= CAMERA_MOV_SPD * dt;
         }
         if (r.RGFW_isKeyDown(r.RGFW_keyD) == 1) {
-            camera_target.pos[0] -= CAMERA_MOV_SPD * dt;
+            camera_target.pos[0] += CAMERA_MOV_SPD * dt;
         }
         if (r.RGFW_isKeyDown(r.RGFW_keyW) == 1) {
             camera_target.pos[1] -= CAMERA_MOV_SPD * dt;
         }
         if (r.RGFW_isKeyDown(r.RGFW_keyS) == 1) {
             camera_target.pos[1] += CAMERA_MOV_SPD * dt;
+        }
+        if (r.RGFW_isKeyPressed(r.RGFW_keyG) == 1) {
+            display_gui = !display_gui;
         }
 
         if (r.RGFW_isKeyPressed(r.RGFW_keyR) == 1) {
@@ -220,9 +219,11 @@ pub fn main(init: std.process.Init) !void {
         camera.pos[0] = exp_smooth(camera.pos[0], camera_target.pos[0], dt * CAMERA_SMOOTH_SPD);
         camera.pos[1] = exp_smooth(camera.pos[1], camera_target.pos[1], dt * CAMERA_SMOOTH_SPD);
 
-        // try vulkan.copy_buffer(staging_buf, grid_offsets_buf, @sizeOf(u32) * GRID_CELL_COUNT);
-        // const offsets = std.mem.bytesAsSlice(u32, std.mem.sliceAsBytes(staging_mapped));
-        // std.log.info("grid_offset[0]={}", .{offsets[0]});
+        const mouse_screen = get_mouse(window);
+        const mouse = (mouse_screen / V2 {WINDOW_W, WINDOW_H})*m.splat2(2) - m.splat2(1);
+
+        try vulkan.copy_buffer(staging_buf, grid_offsets_buf, @sizeOf(u32) * GRID_CELL_COUNT);
+        const offsets = std.mem.bytesAsSlice(u32, std.mem.sliceAsBytes(staging_mapped));
 
         // try vulkan.copy_buffer(staging_buf, grid_offsets_prefix_buf, @sizeOf(u32) * (GRID_CELL_COUNT + 1));
         // std.log.info("grid_offset_prefix[1]={}", .{offsets[1]});
@@ -257,7 +258,24 @@ pub fn main(init: std.process.Init) !void {
 
         vulkan.begin_2d();
         vulkan.Draw.rectangle(.screen, .{1,1,1,1}, vulkan.state.hdr_image_view);
-        vulkan.Draw.rectangle(.{.pos = .{-1,-1}, .size = .{1,1}}, .{1,1,1,1}, null);
+        if (display_gui) {
+            vulkan.begin_camera(.{.pos = .{camera.pos[0],-camera.pos[1]}, .zoom = camera.zoom});
+            const thick = 0.01;
+            for (0..GRID_CELL_SIDE_COUNT+1) |i| {
+                const f: f32 = @floatFromInt(i);
+                vulkan.Draw.rectangle(.{.pos = .{-1,-1+f*GRID_CELL_SIZE-thick/2.0}, .size = .{2,thick}}, .{1,1,1,1}, null);
+                vulkan.Draw.rectangle(.{.pos = .{-1+f*GRID_CELL_SIZE-thick/2.0,-1}, .size = .{thick,2}}, .{1,1,1,1}, null);
+            }
+            const camera_mouse = camera.untranslate(mouse);
+            if (m.cell_from_pos(camera_mouse)) |cell| {
+                // log.info("camera mouse={}, cell={}", .{camera_mouse, cell});
+                const pos = m.splat2(GRID_CELL_SIZE)*@as(V2, @floatFromInt(cell)) + m.splat2(-1);
+                vulkan.Draw.rectangle(.{.pos = pos, .size = m.splat2(GRID_CELL_SIZE) }, .{1,0,0,0.2}, null);
+                const bin = m.bin_from_cell(cell);
+                log.info("cell: {}, bin: {}, count: {}", .{ cell, bin, offsets[bin] });
+            }
+            vulkan.end_camera();
+        }
         vulkan.end_2d();
 
         try vulkan.end_draw();
@@ -281,6 +299,7 @@ const std = @import("std");
 const log = std.log;
 const fatal = std.process.fatal;
 const assert = std.debug.assert;
+const Camera = vulkan.Camera;
 
 const V2 = @Vector(2, f32);
 const V3 = @Vector(3, f32);
@@ -303,6 +322,13 @@ const CAMERA_SMOOTH_SPD = 10;
 
 pub fn exp_smooth(current: f32, target: f32, delta: f32) f32 {
     return current + (target - current) * (1 - @exp(-delta));
+}
+
+pub fn get_mouse(win: *r.RGFW_window) V2 {
+    var x: i32 = 0;
+    var y: i32 = 0;
+    _ = r.RGFW_window_getMouse(win, &x, &y);
+    return .{@floatFromInt(x), @floatFromInt(y)};
 }
 
 const vkGetInstanceProcAddr = @extern(v.PfnGetInstanceProcAddr, .{

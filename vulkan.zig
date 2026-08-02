@@ -81,6 +81,7 @@ per_frame: struct {
     vertexes: std.ArrayList(Vertex_Data) = .empty,
     vert_ct: u32 = 0,
 
+    camera: Camera = .init,
     cmd: v.CommandBuffer = .null_handle,
     present_image_idx: u32 = 0,
     curr_compute_stage: ?u32 = null,
@@ -502,6 +503,7 @@ pub fn cleanup() void {
 
 const v = @import("vk.zig");
 const r = @import("RGFW");
+const m = @import("math.zig");
 
 const Instance = v.InstanceProxy;
 const Device = v.DeviceProxy;
@@ -956,7 +958,7 @@ pub fn init_pipeline() !void {
         .render_pass       = state.render_pass,
         .layout            = state.triangle_pl_layout,
     });
-    const MAX_VERT_LEN = 64;
+    const MAX_VERT_LEN = 256;
     for (&state.graphics_vert_bufs, &state.graphics_vert_maps) |*buf, *map| {
         buf.* = try create_buffer(
             MAX_VERT_LEN*@sizeOf(Vertex_Data),
@@ -1214,6 +1216,14 @@ pub fn end_2d() void {
     device.cmdEndRenderPass(cmd);
 }
 
+pub fn begin_camera(camera: Camera) void {
+    state.per_frame.camera = camera;
+}
+
+pub fn end_camera() void {
+    state.per_frame.camera = .init;
+}
+
 pub fn draw_particles_to_off_screen(
     particle_vert_ct: u32
 ) void {
@@ -1376,9 +1386,28 @@ const V3 = @Vector(3, f32);
 const V4 = @Vector(4, f32);
 
 pub const Triangle_Constant = extern struct {
-    pure_color: bool,
-    padding: u32 = 0,
+    pure_color: u32,
+    camera: Camera,
 };
+
+pub const Camera = extern struct {
+    pos: [2]f32 = .{0,0},
+    zoom: f32 = 1,
+
+    pub const init = Camera { .pos = .{0,0}, .zoom = 1 };
+
+    pub fn translate(self: Camera, pos: V2) V2 {
+        return (pos - self.pos) * m.splat2(self.zoom);
+    }
+
+    pub fn untranslate(self: Camera, pos: V2) V2 {
+        return pos / m.splat2(self.zoom) + self.pos;
+    }
+};
+
+pub fn from_pixel(p: f32) f32 {
+    return p / @as(f32, @floatFromInt(state.extent.width * 2));
+}
 
 pub const Draw = struct {
     fn push_vertex(vertex: Vertex_Data) void {
@@ -1389,26 +1418,32 @@ pub const Draw = struct {
         const curr_frame = state.per_frame.curr_frame;
         const cmd = state.per_frame.cmd;
 
-        push_vertex(.{ .pos = rect.pos,                      .tex = .{0,1}, .color = color });
-        push_vertex(.{ .pos = rect.pos + V2{rect.size[0],0}, .tex = .{1,1}, .color = color });
-        push_vertex(.{ .pos = rect.pos + V2{0,rect.size[1]}, .tex = .{0,0}, .color = color });
+        push_vertex(.{ .pos = rect.pos,                      .tex = .{0,0}, .color = color });
+        push_vertex(.{ .pos = rect.pos + V2{rect.size[0],0}, .tex = .{1,0}, .color = color });
+        push_vertex(.{ .pos = rect.pos + V2{0,rect.size[1]}, .tex = .{0,1}, .color = color });
 
-        push_vertex(.{ .pos = rect.pos + V2{rect.size[0],0}, .tex = .{1,1}, .color = color });
-        push_vertex(.{ .pos = rect.pos + @as(V2, rect.size), .tex = .{1,0}, .color = color });
-        push_vertex(.{ .pos = rect.pos + V2{0,rect.size[1]}, .tex = .{0,0}, .color = color });
+        push_vertex(.{ .pos = rect.pos + V2{rect.size[0],0}, .tex = .{1,0}, .color = color });
+        push_vertex(.{ .pos = rect.pos + @as(V2, rect.size), .tex = .{1,1}, .color = color });
+        push_vertex(.{ .pos = rect.pos + V2{0,rect.size[1]}, .tex = .{0,1}, .color = color });
 
         const vert_ct: u32 = @intCast(state.per_frame.vertexes.items.len);
         @memcpy(state.graphics_vert_maps[curr_frame][state.per_frame.vert_ct..state.per_frame.vert_ct+vert_ct], state.per_frame.vertexes.items);
         state.per_frame.vertexes.clearRetainingCapacity();
         if (texture) |tex| {
             write_texture_to_descriptor(curr_frame, tex);
-            push_constant(Triangle_Constant, &.{ .pure_color = false });
+            push_constant(Triangle_Constant, &.{ .pure_color = 0, .camera = state.per_frame.camera });
         } else {
-            push_constant(Triangle_Constant, &.{ .pure_color = true });
+            push_constant(Triangle_Constant, &.{ .pure_color = 1, .camera = state.per_frame.camera });
         }
 
         device.cmdBindVertexBuffers(cmd, 0, &.{state.graphics_vert_bufs[curr_frame].buf}, &.{0});
         device.cmdDraw(cmd, @intCast(vert_ct), 1, state.per_frame.vert_ct, 0);
         state.per_frame.vert_ct += vert_ct;
     }
+
+    // pub fn line(start: V2, end: V2, thick: f32, color: Color) void {
+    //     const l = end - start;
+    //     const orthoganal_l = m.normalize(.{ l[1], -l[0] });
+    //     const pos = start - orthoganal_l * m.splat2(thick/2);
+    // }
 };
