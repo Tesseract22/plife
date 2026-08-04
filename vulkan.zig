@@ -39,9 +39,7 @@ render_pass       : v.RenderPass = .null_handle,
 frame_buffers     : []v.Framebuffer = &.{},
 image_views       : []v.ImageView = &.{},
 
-hdr_image_mem     : v.DeviceMemory = .null_handle,
-hdr_image         : v.Image = .null_handle,
-hdr_image_view    : v.ImageView = .null_handle,
+hdr_texture       : Texture = .null_handle,
 off_screen_render_pass   : v.RenderPass = .null_handle,
 hdr_frame_buffer  : v.Framebuffer = .null_handle,
 hdr_sampler       : v.Sampler = .null_handle,
@@ -118,6 +116,14 @@ pub const Vertex_Data = extern struct {
 
         };
     }
+};
+
+pub const Texture = struct {
+    image: v.Image,
+    view : v.ImageView,
+    mem  : v.DeviceMemory,
+
+    pub const null_handle = Texture { .image = .null_handle, .view = .null_handle, .mem = .null_handle };
 };
 // pub fn init_window(w: u32, h: u32, name: []const u8) void {
 //
@@ -357,6 +363,53 @@ pub fn init_swapchain(device: Device) !void {
     state.swapchain = try device.createSwapchainKHR(&create_info, null);
 }
 
+pub fn create_texture(format: v.Format) !Texture {
+    const device = state.device;
+    const image = try device.createImage(&.{
+           .image_type = .@"2d",
+           .format = HDR_FORMAT,
+           .extent = .{ .width = state.extent.width, .height = state.extent.height, .depth = 1 },
+           .mip_levels = 1,
+           .array_layers = 1,
+           .samples = .{ .@"1" = true },
+           .tiling = .optimal,
+           .usage = .{ .color_attachment = true, .sampled = true }, // TODO: pass as params
+           .sharing_mode = .exclusive,
+           .initial_layout = .@"undefined",
+    }, null);
+
+    const mem_reqs = device.getImageMemoryRequirements(image);
+    const mem_type = find_mem_type(mem_reqs.memory_type_bits, .{ .device_local = true });
+    const mem = try device.allocateMemory(&.{
+            .allocation_size = mem_reqs.size,
+            .memory_type_index = mem_type,
+    }, null);
+    try device.bindImageMemory(image, mem, 0);
+    const view = try device.createImageView(&.{
+        .image = image,
+        .view_type = .@"2d",
+        .format = format,
+        .components = .{
+            .r = .identity,
+            .g = .identity,
+            .b = .identity,
+            .a = .identity,
+        },
+        .subresource_range = .{
+            .aspect_mask = .{ .color = true },
+            .base_mip_level = 0,
+            .level_count = 1,
+            .base_array_layer = 0,
+            .layer_count = 1,
+        },
+    }, null);
+    return Texture {
+        .image = image,
+        .view  = view,
+        .mem   = mem,
+    };
+}
+
 pub fn init_image_views(device: Device) !void {
     const arena = state.arena.allocator();
     var image_count: u32 = 0;
@@ -387,44 +440,7 @@ pub fn init_image_views(device: Device) !void {
         };
         state.image_views[i] = try device.createImageView(&create_info, null);
     }
-    state.hdr_image = try device.createImage(&.{
-           .image_type = .@"2d",
-           .format = HDR_FORMAT,
-           .extent = .{ .width = state.extent.width, .height = state.extent.height, .depth = 1 },
-           .mip_levels = 1,
-           .array_layers = 1,
-           .samples = .{ .@"1" = true },
-           .tiling = .optimal,
-           .usage = .{ .color_attachment = true, .sampled = true },
-           .sharing_mode = .exclusive,
-           .initial_layout = .@"undefined",
-    }, null);
-
-    const mem_reqs = device.getImageMemoryRequirements(state.hdr_image);
-    const mem_type = find_mem_type(mem_reqs.memory_type_bits, .{ .device_local = true });
-    state.hdr_image_mem = try device.allocateMemory(&.{
-            .allocation_size = mem_reqs.size,
-            .memory_type_index = mem_type,
-    }, null);
-    try device.bindImageMemory(state.hdr_image, state.hdr_image_mem, 0);
-    state.hdr_image_view = try device.createImageView(&.{
-        .image = state.hdr_image,
-        .view_type = .@"2d",
-        .format = HDR_FORMAT,
-        .components = .{
-            .r = .identity,
-            .g = .identity,
-            .b = .identity,
-            .a = .identity,
-        },
-        .subresource_range = .{
-            .aspect_mask = .{ .color = true },
-            .base_mip_level = 0,
-            .level_count = 1,
-            .base_array_layer = 0,
-            .layer_count = 1,
-        },
-        }, null);
+    state.hdr_texture = try create_texture(HDR_FORMAT);
     const props = state.instance.getPhysicalDeviceProperties(state.physical_device);
     state.hdr_sampler = try device.createSampler(&.{
         .mag_filter = .linear,
@@ -589,7 +605,7 @@ pub fn init_hdr_render_pass() !void {
     state.hdr_frame_buffer = try state.device.createFramebuffer(&.{
         .render_pass = state.off_screen_render_pass,
         .attachment_count = 1,
-        .p_attachments = @ptrCast(&state.hdr_image_view),
+        .p_attachments = @ptrCast(&state.hdr_texture.view),
         .width = state.extent.width,
         .height = state.extent.height,
         .layers = 1,

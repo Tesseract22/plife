@@ -3,3 +3,4 @@
 #define RGFW_DEBUG
 #define RGFW_PRINT_ERRORS
 #include "thirdparty/RGFW.h"
+#include "thirdparty/stb_truetype.h"

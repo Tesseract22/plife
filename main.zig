@@ -170,8 +170,8 @@ pub fn main(init: std.process.Init) !void {
 
     try vulkan.init_command_buffers(device);
     try vulkan.init_sync_primitives(device);
-    vulkan.write_texture_to_descriptor(0, vulkan.state.hdr_image_view);
-    vulkan.write_texture_to_descriptor(1, vulkan.state.hdr_image_view);
+    vulkan.write_texture_to_descriptor(0, vulkan.state.hdr_texture.view);
+    vulkan.write_texture_to_descriptor(1, vulkan.state.hdr_texture.view);
 
     const target_fps = 60.0;
     const target_dt  = 1.0/target_fps;
@@ -285,7 +285,7 @@ pub fn main(init: std.process.Init) !void {
         vulkan.draw_particles_to_off_screen(@intCast(particles.len * VERT_PER_PARTICLE));
 
         vulkan.begin_2d();
-        vulkan.Draw.rectangle(.screen, .{1,1,1,1}, vulkan.state.hdr_image_view);
+        vulkan.Draw.rectangle(.screen, .{1,1,1,1}, vulkan.state.hdr_texture.view);
         if (display_gui) {
             vulkan.begin_camera(.{.pos = .{camera.pos[0],-camera.pos[1]}, .zoom = camera.zoom});
             const thick = 0.01;
@@ -318,6 +318,7 @@ pub fn main(init: std.process.Init) !void {
 const vulkan = @import("vulkan.zig");
 const r = @import("RGFW");
 const m = @import("math.zig");
+// const font = @import("font.zig");
 
 const std = @import("std");
 const log = std.log;

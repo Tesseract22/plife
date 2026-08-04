@@ -41,6 +41,7 @@ pub fn build(b: *std.Build) void {
         .file = b.path("c.h"),
         .flags = &.{
             "-DRGFW_IMPLEMENTATION",
+            "-DSTB_TRUETYPE_IMPLEMENTATION"
         },
         .language = .c,
     });
