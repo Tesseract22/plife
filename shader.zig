@@ -1,5 +1,5 @@
-pub const PARTICLE_SIZE = 0.05;
-pub const PARTICLE_KERNEL_SIZE = 0.01;
+pub const PARTICLE_SIZE = 0.03;
+pub const PARTICLE_KERNEL_SIZE = 0.005;
 pub const Vertex = struct {
     const positions = [driver.VERT_PER_PARTICLE]V2 {
         .{-0.5, -0.5},
@@ -242,7 +242,7 @@ pub const Compute = struct {
     }
 
     // TODO: make this configurable from CPU
-    const PARTICLE_DRAG = 20;
+    const PARTICLE_DRAG = 40;
     const boundary_mode: enum { clamp, wrap } = .wrap;
 
     const particles_in = @extern(*addrspace(.storage_buffer) Particle_Array , .{
@@ -271,7 +271,7 @@ pub const Compute = struct {
     });
 
     pub fn main() callconv(.{ .spirv_kernel = .{.x=driver.KERNEL_WORKGROUP_X,.y=1,.z=1}}) void {
-        const dt = 1.0/60.0;
+        const dt = 1.0/120.0;
         const i = spirv.global_invocation_id[0];
         if (i >= particles_in.ptr.len) return;
 
@@ -281,16 +281,15 @@ pub const Compute = struct {
         // spd = spd + compute_interaction_with_range(i, 0, particles_in.ptr.len) * m.splat2(dt);
                 const cell = m.cell_from_pos(pos).?;
                 const cell_i: @Vector(2, f32) = .{@floatFromInt(cell[0]), @floatFromInt(cell[1])};
-                var x: f32 = -1;
-                while (x <= 1): (x += 1) {
-                    var y: f32 = -1;
-                    while (y <= 1): (y += 1) {
-                        const neighbor_i = @Vector(2, f32) {cell_i[0]+x, cell_i[1]+y};
-                        if (neighbor_i[0] >= driver.GRID_CELL_SIDE_COUNT or neighbor_i[0] < 0) continue; 
-                        if (neighbor_i[1] >= driver.GRID_CELL_SIDE_COUNT or neighbor_i[1] < 0) continue; 
-
-                        const bin = m.bin_from_cell(.{ @intFromFloat(neighbor_i[0]), @intFromFloat(neighbor_i[1]) });
-                        spd = spd + compute_interaction_with_bin(i, bin) * m.splat2(dt);
+                inline for (0..3) |x| {
+                    inline for (0..3) |y| {
+                        const neighbor_i = @Vector(2, f32) {cell_i[0]+x-1, cell_i[1]+y-1};
+                        if (neighbor_i[0] >= driver.GRID_CELL_SIDE_COUNT or neighbor_i[0] < 0) {} 
+                        else if (neighbor_i[1] >= driver.GRID_CELL_SIDE_COUNT or neighbor_i[1] < 0) {}
+                        else {
+                            const bin = m.bin_from_cell(.{ @intFromFloat(neighbor_i[0]), @intFromFloat(neighbor_i[1]) });
+                            spd = spd + compute_interaction_with_bin(i, bin) * m.splat2(dt);
+                        }
                     }
                 }
                 // for (0..grid_offsets.ptr.len) |bin| {
@@ -412,7 +411,7 @@ fn SpirvArray(comptime T: type) type {
 }
 pub const Image = @SpirvType(.{ .image = .{
         .usage = .{ .sampled = f32 },
-        .format = .rgba16f,
+        .format = .unknown,
         .dim = .@"2d",
         .depth = .not_depth,
         .arrayed = false,

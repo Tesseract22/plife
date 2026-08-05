@@ -2,6 +2,7 @@ const Vulkan = @This();
 const HDR_FORMAT = v.Format.r16g16b16a16_sfloat;
 pub const MAX_FRAMES_IN_FLIGHT = 2;
 pub const COMPUTE_STAGE_COUNT  = 4;
+pub const MAX_TEXTURE          = 4;
 vkb: v.BaseWrapper = undefined,
 instance_handle   : v.Instance = .null_handle,
 instance_wrapper  : v.InstanceWrapper = undefined,
@@ -39,6 +40,8 @@ render_pass       : v.RenderPass = .null_handle,
 frame_buffers     : []v.Framebuffer = &.{},
 image_views       : []v.ImageView = &.{},
 
+font              : Font.Static = undefined,
+
 hdr_texture       : Texture = .null_handle,
 off_screen_render_pass   : v.RenderPass = .null_handle,
 hdr_frame_buffer  : v.Framebuffer = .null_handle,
@@ -50,7 +53,8 @@ particle_pl_layout   : v.PipelineLayout = .null_handle,
 triangle_pl_layout   : v.PipelineLayout = .null_handle,
 descriptor_pool   : v.DescriptorPool = .null_handle,
 particle_desc_set : [MAX_FRAMES_IN_FLIGHT]v.DescriptorSet = .{.null_handle, .null_handle},
-triangle_desc_set : [MAX_FRAMES_IN_FLIGHT]v.DescriptorSet = .{.null_handle, .null_handle},
+// Use the first half of the desc_set for the frame 0, and second half for frame 1
+triangle_desc_set : [MAX_FRAMES_IN_FLIGHT * MAX_TEXTURE]v.DescriptorSet = undefined,
 
 graphics_pipeline     : v.Pipeline = .null_handle,
 graphics_vert_bufs    : [MAX_FRAMES_IN_FLIGHT]Buffer = .{.null, .null},
@@ -78,6 +82,7 @@ per_frame: struct {
     curr_frame: u32 = 0,
     vertexes: std.ArrayList(Vertex_Data) = .empty,
     vert_ct: u32 = 0,
+    triangle_texture_ct: u32 = 0,
 
     camera: Camera = .init,
     cmd: v.CommandBuffer = .null_handle,
@@ -325,6 +330,10 @@ pub const Queues = struct {
     present_queue: v.Queue,
 };
 
+pub fn init_font() !void {
+    state.font = try .init(@embedFile("Acme 9 Regular.ttf"), 0, 127, .{256,256}, 30, state.gpa);
+}
+
 pub fn init_queues(device: Device) void {
     state.graphics_queue = device.getDeviceQueue(state.graphics_compute_family, 0);
     state.present_queue = state.graphics_queue;
@@ -363,19 +372,19 @@ pub fn init_swapchain(device: Device) !void {
     state.swapchain = try device.createSwapchainKHR(&create_info, null);
 }
 
-pub fn create_texture(format: v.Format) !Texture {
+pub fn create_texture(format: v.Format, w: u32, h: u32, usage: v.ImageUsageFlags, layout: v.ImageLayout, swizzle: ?v.ComponentMapping) !Texture {
     const device = state.device;
     const image = try device.createImage(&.{
            .image_type = .@"2d",
-           .format = HDR_FORMAT,
-           .extent = .{ .width = state.extent.width, .height = state.extent.height, .depth = 1 },
+           .format = format,
+           .extent = .{ .width = w, .height = h, .depth = 1 },
            .mip_levels = 1,
            .array_layers = 1,
            .samples = .{ .@"1" = true },
            .tiling = .optimal,
-           .usage = .{ .color_attachment = true, .sampled = true }, // TODO: pass as params
+           .usage = usage,
            .sharing_mode = .exclusive,
-           .initial_layout = .@"undefined",
+           .initial_layout = layout,
     }, null);
 
     const mem_reqs = device.getImageMemoryRequirements(image);
@@ -389,7 +398,7 @@ pub fn create_texture(format: v.Format) !Texture {
         .image = image,
         .view_type = .@"2d",
         .format = format,
-        .components = .{
+        .components = swizzle orelse .{
             .r = .identity,
             .g = .identity,
             .b = .identity,
@@ -440,7 +449,11 @@ pub fn init_image_views(device: Device) !void {
         };
         state.image_views[i] = try device.createImageView(&create_info, null);
     }
-    state.hdr_texture = try create_texture(HDR_FORMAT);
+    state.hdr_texture = try create_texture(
+        HDR_FORMAT,
+        state.extent.width, state.extent.height,
+        .{ .color_attachment = true, .sampled = true },
+        .@"undefined", null);
     const props = state.instance.getPhysicalDeviceProperties(state.physical_device);
     state.hdr_sampler = try device.createSampler(&.{
         .mag_filter = .linear,
@@ -520,6 +533,7 @@ pub fn cleanup() void {
 const v = @import("thirdparty/vk.zig");
 const r = @import("RGFW");
 const m = @import("math.zig");
+const Font = @import("font.zig");
 
 const Instance = v.InstanceProxy;
 const Device = v.DeviceProxy;
@@ -634,10 +648,10 @@ pub fn init_frame_buffers(arena: std.mem.Allocator, device: Device) !void {
     }
 }
 
-pub fn write_texture_to_descriptor(curr_frame: u32, texture: v.ImageView) void {
+pub fn write_texture_to_descriptor(idx: u32, texture: v.ImageView) void {
     const writes = [_]v.WriteDescriptorSet {
         .{
-            .dst_set = state.triangle_desc_set[curr_frame],
+            .dst_set = state.triangle_desc_set[idx],
             .dst_binding = 0,
             .dst_array_element = 0,
             .descriptor_count = 1,
@@ -737,11 +751,11 @@ pub fn init_particle_desc_set(
 
         .{
             .type = .combined_image_sampler,
-            .descriptor_count = 2,
+            .descriptor_count = MAX_TEXTURE * MAX_FRAMES_IN_FLIGHT,
         }
     };
     state.descriptor_pool = try device.createDescriptorPool(&.{
-        .max_sets = MAX_FRAMES_IN_FLIGHT + MAX_FRAMES_IN_FLIGHT,
+        .max_sets = state.particle_desc_set.len + state.triangle_desc_set.len,
         .pool_size_count = pool_sizes.len,
         .p_pool_sizes = &pool_sizes
     }, null);
@@ -824,11 +838,13 @@ pub fn init_triangle_desc_set() !void {
         .p_bindings = &bindings,
     }, null);
 
+    var layout: [MAX_FRAMES_IN_FLIGHT * MAX_TEXTURE]v.DescriptorSetLayout = undefined;
+    @memset(&layout, state.triangle_desc_set_layout);
     // Allocate
     try device.allocateDescriptorSets(&.{
         .descriptor_pool = state.descriptor_pool,
-            .descriptor_set_count = 2,
-            .p_set_layouts = &.{state.triangle_desc_set_layout, state.triangle_desc_set_layout}, // same layout for both set
+            .descriptor_set_count = state.triangle_desc_set.len,
+            .p_set_layouts = &layout, // same layout for both set
     }, &state.triangle_desc_set);
     // Writing buffer references is done per frame
 }
@@ -1157,31 +1173,40 @@ pub fn create_vertex_buffer(size: usize) !Buffer {
     return create_buffer(size, .{ .transfer_dst = true, .vertex_buffer = true }, .{ .device_local = true });
 }
 
-pub fn copy_buffer(dst: Buffer, src: Buffer, size: usize) !void {
+pub fn begin_tmp_cmd() !v.CommandBuffer {
     const device = state.device;
-
     var cmd: v.CommandBuffer = .null_handle;
     try device.allocateCommandBuffers(&.{
        .level = .primary,
        .command_pool = state.command_pool,
        .command_buffer_count = 1,
     }, @ptrCast(&cmd));
-    defer device.freeCommandBuffers(state.command_pool, &.{cmd});
 
-    {
-        try device.beginCommandBuffer(cmd, &.{
-            .flags = .{ .one_time_submit = true },
-        });
-        device.cmdCopyBuffer(cmd, src.buf, dst.buf, &.{
-            .{ .src_offset = 0, .dst_offset = 0, .size = size },
-        });
-        try device.endCommandBuffer(cmd);
-    }
+    try device.beginCommandBuffer(cmd, &.{
+        .flags = .{ .one_time_submit = true },
+    });
+    return cmd;
+}
+
+pub fn end_tmp_cmd(cmd: v.CommandBuffer) !void {
+    const device = state.device;
+    try device.endCommandBuffer(cmd);
 
     try device.queueSubmit(state.graphics_queue, &.{
         .{ .command_buffer_count = 1, .p_command_buffers = &.{cmd} }
     }, .null_handle);
     try device.queueWaitIdle(state.graphics_queue);
+
+    device.freeCommandBuffers(state.command_pool, &.{cmd});
+}
+
+pub fn copy_buffer(dst: Buffer, src: Buffer, size: usize) !void {
+    const device = state.device;
+    const cmd = try begin_tmp_cmd();
+    device.cmdCopyBuffer(cmd, src.buf, dst.buf, &.{
+        .{ .src_offset = 0, .dst_offset = 0, .size = size },
+    });
+    try end_tmp_cmd(cmd);
 }
 
 pub fn map_mem(mem: v.DeviceMemory, comptime T: type, len: usize) ![]T {
@@ -1189,6 +1214,10 @@ pub fn map_mem(mem: v.DeviceMemory, comptime T: type, len: usize) ![]T {
     const size = @sizeOf(T) * len;
     const ptr: [*]T = @alignCast(@ptrCast(try device.mapMemory(mem, 0, size, .{})));
     return ptr[0..len];
+}
+
+pub fn unmap_mem(mem: v.DeviceMemory) void {
+    state.device.unmapMemory(mem);
 }
 
 pub fn init_sync_primitives(device: Device) !void {
@@ -1229,13 +1258,13 @@ pub fn end_draw() !void {
     try submit_graphics_cmd(state.graphics_command_buffers[curr_frame.*], curr_frame.*, state.per_frame.present_image_idx);
     curr_frame.* = (curr_frame.* + 1) % MAX_FRAMES_IN_FLIGHT;
     state.frame_counter += 1;
+    state.per_frame.triangle_texture_ct = curr_frame.* * MAX_TEXTURE;
 }
 
 pub fn begin_2d() void {
     const device = state.device;
     const cmd = state.per_frame.cmd;
     const image_idx = state.per_frame.present_image_idx;
-    const curr_frame = state.per_frame.curr_frame;
     const frame_buffer = state.frame_buffers[image_idx];
 
     state.per_frame.vert_ct = 0;
@@ -1258,14 +1287,6 @@ pub fn begin_2d() void {
 
     device.cmdSetViewport(cmd, 0, &.{state.viewport});
     device.cmdSetScissor(cmd, 0, &.{state.scissor});
-
-    // if (state.per_frame.push_constant_size > 0)
-    //     device.cmdPushConstants(cmd, state.particle_pl_layout, .{ .vertex = true, .fragment = true, .compute = true }, 0,
-    //         state.per_frame.push_constant_size, state.per_frame.push_constant);
-
-    device.cmdBindDescriptorSets(cmd,
-        .graphics, state.triangle_pl_layout, 0, &.{ state.triangle_desc_set[curr_frame] }, null);
-
 }
 
 pub fn end_2d() void {
@@ -1472,32 +1493,66 @@ pub const Draw = struct {
     fn push_vertex(vertex: Vertex_Data) void {
         state.per_frame.vertexes.append(state.gpa, vertex) catch @panic("OOM");
     }
-    pub fn rectangle(rect: Rect, color: Color, texture: ?v.ImageView) void {
-        const device = state.device;
+    
+    fn push_rect_vertex(rect: Rect, color: [4]f32, tex_coord: [4][2]f32) void {
+        push_vertex(.{ .pos = rect.pos,                      .tex = tex_coord[0], .color = color });
+        push_vertex(.{ .pos = rect.pos + V2{rect.size[0],0}, .tex = tex_coord[1], .color = color });
+        push_vertex(.{ .pos = rect.pos + V2{0,rect.size[1]}, .tex = tex_coord[2], .color = color });
+
+        push_vertex(.{ .pos = rect.pos + V2{rect.size[0],0}, .tex = tex_coord[1], .color = color });
+        push_vertex(.{ .pos = rect.pos + @as(V2, rect.size), .tex = tex_coord[3], .color = color });
+        push_vertex(.{ .pos = rect.pos + V2{0,rect.size[1]}, .tex = tex_coord[2], .color = color });
+    }
+
+    fn draw_vertex() void {
         const curr_frame = state.per_frame.curr_frame;
+        const device = state.device;
         const cmd = state.per_frame.cmd;
-
-        push_vertex(.{ .pos = rect.pos,                      .tex = .{0,0}, .color = color });
-        push_vertex(.{ .pos = rect.pos + V2{rect.size[0],0}, .tex = .{1,0}, .color = color });
-        push_vertex(.{ .pos = rect.pos + V2{0,rect.size[1]}, .tex = .{0,1}, .color = color });
-
-        push_vertex(.{ .pos = rect.pos + V2{rect.size[0],0}, .tex = .{1,0}, .color = color });
-        push_vertex(.{ .pos = rect.pos + @as(V2, rect.size), .tex = .{1,1}, .color = color });
-        push_vertex(.{ .pos = rect.pos + V2{0,rect.size[1]}, .tex = .{0,1}, .color = color });
 
         const vert_ct: u32 = @intCast(state.per_frame.vertexes.items.len);
         @memcpy(state.graphics_vert_maps[curr_frame][state.per_frame.vert_ct..state.per_frame.vert_ct+vert_ct], state.per_frame.vertexes.items);
         state.per_frame.vertexes.clearRetainingCapacity();
-        if (texture) |tex| {
-            write_texture_to_descriptor(curr_frame, tex);
-            push_constant(Triangle_Constant, &.{ .pure_color = 0, .camera = state.per_frame.camera });
-        } else {
-            push_constant(Triangle_Constant, &.{ .pure_color = 1, .camera = state.per_frame.camera });
-        }
+
 
         device.cmdBindVertexBuffers(cmd, 0, &.{state.graphics_vert_bufs[curr_frame].buf}, &.{0});
         device.cmdDraw(cmd, @intCast(vert_ct), 1, state.per_frame.vert_ct, 0);
         state.per_frame.vert_ct += vert_ct;
+    }
+
+    pub fn rectangle(rect: Rect, color: Color) void {
+        texture(rect, color, null);
+    }
+
+    pub fn texture(rect: Rect, color: Color, tex: ?v.ImageView) void {
+        texture2(rect, color, tex, .{
+            .{0,0},
+            .{1,0},
+            .{0,1},
+            .{1,1},
+        });
+    }
+
+    // tex_coord order:
+    //   topleft (pos),
+    //   topright,
+    //   botleft,
+    //   botright
+    pub fn texture2(rect: Rect, color: Color, tex: ?v.ImageView, tex_coord: [4][2]f32) void {
+        prepare_texture(tex);
+        push_rect_vertex(rect, color, tex_coord);
+        draw_vertex();
+    }
+
+    fn prepare_texture(tex: ?v.ImageView) void {
+        if (tex) |tex_inner| {
+            const texture_ct = &state.per_frame.triangle_texture_ct;
+            write_texture_to_descriptor(texture_ct.*, tex_inner);
+            state.device.cmdBindDescriptorSets(state.per_frame.cmd, .graphics, state.triangle_pl_layout, 0, state.triangle_desc_set[texture_ct.*..][0..1], null);
+            push_constant(Triangle_Constant, &.{ .pure_color = 0, .camera = state.per_frame.camera });
+            texture_ct.* += 1;
+        } else {
+            push_constant(Triangle_Constant, &.{ .pure_color = 1, .camera = state.per_frame.camera });
+        }
     }
 
     // pub fn line(start: V2, end: V2, thick: f32, color: Color) void {
@@ -1505,4 +1560,41 @@ pub const Draw = struct {
     //     const orthoganal_l = m.normalize(.{ l[1], -l[0] });
     //     const pos = start - orthoganal_l * m.splat2(thick/2);
     // }
+
+    pub fn text(pos: [2]f32, str: []const u8, scale: f32, color: [4]f32) void {
+        const font = state.font;
+        const pixel_scale = 1.0/@as(f32, @floatFromInt(state.extent.width)) * scale;
+        const font_h = pixel_scale * font.size/2;
+
+        prepare_texture(font.bitmap.view);
+
+        var local_pos = pos;
+        for (str) |ch| {
+            const packed_char = font.packed_chars[ch - font.code_first_char];
+            const aligned_quad = font.aligned_quads[ch - font.code_first_char];
+
+            const advance = packed_char.xadvance * pixel_scale;
+            const w = 
+                @as(f32, @floatFromInt(packed_char.x1 - packed_char.x0))
+                * pixel_scale;
+            const h = 
+                @as(f32, @floatFromInt(packed_char.y1 - packed_char.y0))
+                * pixel_scale;
+            const left = local_pos[0] + (packed_char.xoff * pixel_scale);
+            const bot = local_pos[1] - 
+                (packed_char.yoff * pixel_scale) - @as(f32, @floatFromInt(packed_char.y1 - packed_char.y0))
+                * pixel_scale;
+            _ = bot;
+            const top = local_pos[1] + (font_h - h);
+            const tex_coord = [4][2]f32 {
+                .{ aligned_quad.s0, aligned_quad.t0 },
+                .{ aligned_quad.s1, aligned_quad.t0 },
+                .{ aligned_quad.s0, aligned_quad.t1 },
+                .{ aligned_quad.s1, aligned_quad.t1 },
+            };
+            push_rect_vertex(.{.pos = .{left, top}, .size = .{w,h}}, color, tex_coord);
+            local_pos[0] += advance;
+        }
+        draw_vertex();
+    }
 };

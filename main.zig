@@ -1,7 +1,7 @@
 pub const KERNEL_WORKGROUP_X = 64;
 pub const MAX_PARTICLE_SPECIE = 4;
 
-pub const GRID_CELL_SIDE_COUNT = 20;
+pub const GRID_CELL_SIDE_COUNT = 30;
 pub const GRID_CELL_COUNT      = GRID_CELL_SIDE_COUNT * GRID_CELL_SIDE_COUNT;
 pub const GRID_CELL_SIZE       = 2.0/@as(comptime_float, GRID_CELL_SIDE_COUNT);
 
@@ -41,10 +41,14 @@ pub fn generate_particle(particles: []Particle, specie_count: usize, rand: std.R
 }
 
 const particle_drag = 20;
-const r_force_radius_max: f32 = 0.099;
-const r_force_radius_min: f32 = 0.05;
-const r_force_strength_max: f32 = 0.20;
-const r_force_strength_min: f32 = 0.05;
+const r_force_radius_max: f32 = 0.05;
+const r_force_radius_min: f32 = 0.01;
+const r_force_strength_max: f32 = 0.10;
+const r_force_strength_min: f32 = 0.08;
+const collision_cfg = Force_Config {
+    .radius = 0.015,
+    .strength = 0.4,
+};
 
 comptime {
     assert(r_force_radius_min < GRID_CELL_SIZE);
@@ -57,15 +61,16 @@ fn random_sign(random: std.Random) f32 {
 pub fn randomize_config(particle_force_configs: []Force_Config, specie_ct: u32, rand: std.Random) void {
     assert(particle_force_configs.len == specie_ct * specie_ct);
     // particle_kind = random.int(u8) % 5 + 2;
-    var i: usize = 0;
-    for (0..specie_ct) |_| {
-        for (0..specie_ct) |_| {
-            particle_force_configs[i] =
+    var count: usize = 0;
+    for (0..specie_ct) |i| {
+        for (0..specie_ct) |j| {
+            const sign = if (i == j) -1 else random_sign(rand);
+            particle_force_configs[count] =
                 .{
                     .radius = float_range(rand, r_force_radius_min, r_force_radius_max),
-                    .strength = random_sign(rand) * float_range(rand, r_force_strength_min, r_force_strength_max),
+                    .strength = sign * float_range(rand, r_force_strength_min, r_force_strength_max),
                 };
-            i += 1;
+            count += 1;
         }
     }
 }
@@ -92,13 +97,8 @@ pub fn main(init: std.process.Init) !void {
 
     var   particles  : [80000]Particle = undefined;
     var   species    : [MAX_PARTICLE_SPECIE]Particle_Specie = undefined;
-    const specie_ct  : u32 = 3;
+    const specie_ct  : u32 = 4;
     var   particle_force_configs : [MAX_PARTICLE_SPECIE*MAX_PARTICLE_SPECIE]Force_Config = undefined;
-    const collision_cfg = Force_Config {
-        .radius = 0.025,
-        .strength = 0.6,
-    };
-
     const particles_size = @sizeOf(Particle) * particles.len;
     randomize_particle_specie(&species, rand);
     randomize_config(particle_force_configs[0..specie_ct*specie_ct], specie_ct, rand);
@@ -128,6 +128,7 @@ pub fn main(init: std.process.Init) !void {
     try vulkan.init_hdr_render_pass();
 
     _ = try vulkan.init_command_pool(device);
+    try vulkan.init_font();
     const part_buf1 = try vulkan.create_storage_buffer(particles_size, true);
     defer part_buf1.destroy();
     const part_buf2 = try vulkan.create_storage_buffer(particles_size, true);
@@ -181,7 +182,7 @@ pub fn main(init: std.process.Init) !void {
     var camera_target = Camera {};
 
     var ping_pong = true;
-    var display_gui = true;
+    var display_gui = false;
     var method = Method.grid;
     while (r.RGFW_window_shouldClose(window) == 0) {
         // TODO: limit frame rate
@@ -285,25 +286,27 @@ pub fn main(init: std.process.Init) !void {
         vulkan.draw_particles_to_off_screen(@intCast(particles.len * VERT_PER_PARTICLE));
 
         vulkan.begin_2d();
-        vulkan.Draw.rectangle(.screen, .{1,1,1,1}, vulkan.state.hdr_texture.view);
+        vulkan.Draw.texture(.screen, .{1,1,1,1}, vulkan.state.hdr_texture.view);
         if (display_gui) {
             vulkan.begin_camera(.{.pos = .{camera.pos[0],-camera.pos[1]}, .zoom = camera.zoom});
             const thick = 0.01;
             for (0..GRID_CELL_SIDE_COUNT+1) |i| {
                 const f: f32 = @floatFromInt(i);
-                vulkan.Draw.rectangle(.{.pos = .{-1,-1+f*GRID_CELL_SIZE-thick/2.0}, .size = .{2,thick}}, .{1,1,1,1}, null);
-                vulkan.Draw.rectangle(.{.pos = .{-1+f*GRID_CELL_SIZE-thick/2.0,-1}, .size = .{thick,2}}, .{1,1,1,1}, null);
+                vulkan.Draw.rectangle(.{.pos = .{-1,-1+f*GRID_CELL_SIZE-thick/2.0}, .size = .{2,thick}}, .{1,1,1,1});
+                vulkan.Draw.rectangle(.{.pos = .{-1+f*GRID_CELL_SIZE-thick/2.0,-1}, .size = .{thick,2}}, .{1,1,1,1});
             }
             const camera_mouse = camera.untranslate(mouse);
             if (m.cell_from_pos(camera_mouse)) |cell| {
                 // log.info("camera mouse={}, cell={}", .{camera_mouse, cell});
                 const pos = m.splat2(GRID_CELL_SIZE)*@as(V2, @floatFromInt(cell)) + m.splat2(-1);
-                vulkan.Draw.rectangle(.{.pos = pos, .size = m.splat2(GRID_CELL_SIZE) }, .{1,0,0,0.2}, null);
+                vulkan.Draw.rectangle(.{.pos = pos, .size = m.splat2(GRID_CELL_SIZE) }, .{1,0,0,0.2});
                 // const bin = m.bin_from_cell(cell);
                 // log.info("cell: {}, bin: {}, count: {}", .{ cell, bin, offsets[bin] });
             }
             vulkan.end_camera();
         }
+        //vulkan.Draw.texture(.{.pos = .{-1,-1}, .size = .{1,1}}, .{1,1,1,1}, vulkan.state.font.bitmap.view);
+        vulkan.Draw.text(.{-1,-1}, "Hello", 5, .{0.6,0.6,0.6,1});
         vulkan.end_2d();
 
         try vulkan.end_draw();
@@ -318,7 +321,7 @@ pub fn main(init: std.process.Init) !void {
 const vulkan = @import("vulkan.zig");
 const r = @import("RGFW");
 const m = @import("math.zig");
-// const font = @import("font.zig");
+const font = @import("font.zig");
 
 const std = @import("std");
 const log = std.log;

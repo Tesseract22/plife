@@ -47,7 +47,7 @@ pub fn build(b: *std.Build) void {
     });
 
     const exe = b.addExecutable(.{
-        .name = "vulkan",
+        .name = "pasim",
         .root_module = mod,
     });
     b.installArtifact(exe);
