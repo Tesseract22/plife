@@ -3,6 +3,7 @@ const HDR_FORMAT = v.Format.r16g16b16a16_sfloat;
 pub const MAX_FRAMES_IN_FLIGHT = 2;
 pub const COMPUTE_STAGE_COUNT  = 4;
 pub const MAX_TEXTURE          = 4;
+pub const MAX_QUERY            = 16;
 vkb: v.BaseWrapper = undefined,
 instance_handle   : v.Instance = .null_handle,
 instance_wrapper  : v.InstanceWrapper = undefined,
@@ -24,6 +25,7 @@ viewport          : v.Viewport = undefined,
 scissor           : v.Rect2D = undefined,
 aspect_ratio      : f32 = 1,
 
+physical_device_props : v.PhysicalDeviceProperties = undefined,
 device_handle     : v.Device = .null_handle,
 device_wrapper    : v.DeviceWrapper = undefined,
 device            : Device = undefined,
@@ -47,6 +49,8 @@ hdr_texture       : Texture = .null_handle,
 off_screen_render_pass   : v.RenderPass = .null_handle,
 hdr_frame_buffer  : v.Framebuffer = .null_handle,
 hdr_sampler       : v.Sampler = .null_handle,
+
+query_pool        : v.QueryPool = .null_handle,
 
 particle_desc_set_layout : v.DescriptorSetLayout = .null_handle,
 triangle_desc_set_layout : v.DescriptorSetLayout = .null_handle,
@@ -90,6 +94,9 @@ per_frame: struct {
     cmd: v.CommandBuffer = .null_handle,
     present_image_idx: u32 = 0,
     curr_compute_stage: ?u32 = null,
+    query_ct: u32 = 0,
+
+    durations: [MAX_QUERY/2]f32 = undefined,
 } = .{},
 
 pub const Vertex_Data = extern struct {
@@ -326,6 +333,11 @@ pub fn init_device(window_width: u32, window_height: u32) !Device {
 
     state.mem_properties =
         state.instance.getPhysicalDeviceMemoryProperties(state.physical_device);
+
+    state.query_pool = try state.device.createQueryPool(&.{
+        .query_type = .timestamp,
+        .query_count = MAX_QUERY,
+    }, null);
     return state.device;
 }
 
@@ -335,7 +347,7 @@ pub const Queues = struct {
 };
 
 pub fn init_font() !void {
-    state.font = try .init(@embedFile("Acme 9 Regular.ttf"), 0, 127, .{256,256}, 30, state.gpa);
+    state.font = try .init(@embedFile("./home-video.regular.ttf"), 0, 128, .{256,256}, 30, state.gpa);
 }
 
 pub fn init_queues(device: Device) void {
@@ -458,7 +470,7 @@ pub fn init_image_views(device: Device) !void {
         state.extent.width, state.extent.height,
         .{ .color_attachment = true, .sampled = true },
         .@"undefined", null);
-    const props = state.instance.getPhysicalDeviceProperties(state.physical_device);
+    state.physical_device_props = state.instance.getPhysicalDeviceProperties(state.physical_device);
     state.hdr_sampler = try device.createSampler(&.{
         .mag_filter = .linear,
         .min_filter = .linear,
@@ -466,7 +478,7 @@ pub fn init_image_views(device: Device) !void {
         .address_mode_v = .clamp_to_edge,
         .address_mode_w = .clamp_to_edge,
         .anisotropy_enable = .true,
-        .max_anisotropy = props.limits.max_sampler_anisotropy,
+        .max_anisotropy = state.physical_device_props.limits.max_sampler_anisotropy,
         .border_color = .int_opaque_black,
         .unnormalized_coordinates = .false,
         .compare_enable = .false,
@@ -525,6 +537,7 @@ pub fn cleanup() void {
 
     device.destroySwapchainKHR(state.swapchain, null);
 
+    device.destroyQueryPool(state.query_pool, null);
     device.destroyDevice(null);
 
     instance.destroySurfaceKHR(state.surface, null);
@@ -1436,12 +1449,29 @@ pub fn compute_fence() !void {
     try state.device.resetFences(&.{state.compute_in_flight_fence});
 }
 
-pub fn begin_dispatch() !void {
+pub fn begin_dispatch() ![]const f32 {
     const device = state.device;
     const cmd = state.compute_command_buffer;
+
+    const query_ct = state.per_frame.query_ct;
+    if (query_ct > 0) {
+        var timestamps: [MAX_QUERY]u64 = undefined;
+        _ = try device.getQueryPoolResults(state.query_pool, 0, query_ct,
+            @sizeOf(u64)*query_ct, &timestamps, @sizeOf(u64),
+            .{ .@"64" = true, .wait = true });
+        for (0..query_ct/2) |i| {
+            const ns = @as(f32, @floatFromInt(timestamps[i*2+1] - timestamps[i*2])) * state.physical_device_props.limits.timestamp_period;
+            state.per_frame.durations[i] = ns / std.time.ns_per_s;
+            // std.log.info("compute shader [{}] time = {d:.4} ms", .{i, ns / std.time.ns_per_ms});
+        }
+    }
     state.per_frame.cmd = cmd;
+    state.per_frame.query_ct = 0;
     try device.resetCommandBuffer(cmd, .{});
     try device.beginCommandBuffer(cmd, &.{});
+    device.cmdResetQueryPool(cmd, state.query_pool, 0, MAX_QUERY);
+
+    return state.per_frame.durations[0..query_ct/2];
 }
 
 pub fn use_compute(compute_stage: u32) void {
@@ -1486,7 +1516,12 @@ pub fn dispatch_compute(dispatch_x: u32) void {
     const device = state.device;
     const cmd = state.per_frame.cmd;
 
+    device.cmdWriteTimestamp(cmd, .{ .compute_shader = true }, state.query_pool, state.per_frame.query_ct);
+    state.per_frame.query_ct += 1;
     device.cmdDispatch(cmd, dispatch_x, 1, 1);
+    device.cmdWriteTimestamp(cmd, .{ .compute_shader = true }, state.query_pool, state.per_frame.query_ct);
+    state.per_frame.query_ct += 1;
+
 }
 
 pub fn end_dispatch() !void {
@@ -1494,6 +1529,8 @@ pub fn end_dispatch() !void {
     const cmd = state.per_frame.cmd;
     defer state.per_frame.cmd = .null_handle;
         
+    //device.cmdWriteTimestamp(cmd, .{ .bottom_of_pipe = true }, state.query_pool, state.per_frame.query_ct);
+    //state.per_frame.query_ct += 1;
     try device.endCommandBuffer(cmd);
 
     const submit_info = v.SubmitInfo {

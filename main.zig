@@ -24,9 +24,24 @@ fn float_range(random: std.Random, min: f32, max: f32) f32 {
     return random.float(f32) * (max - min) + min;
 }
 
+// Too much randomness is boring!
+// When there are many species, each randomization of color become very similar and boring,
+// because they fill the color space somewhat evenly.
+//
+// To remedy this, we first randomly choose a smaller number of color ranges,
+// and then randomize based on those.
+var pre_random_specie: [MAX_PARTICLE_SPECIE][3]f32 = undefined;
+var pre_random_ct: u32 = 0;
 pub fn randomize_particle_specie(species: []Particle_Specie, random: std.Random) void {
+    pre_random_ct = @intFromFloat(@sqrt(@as(f32, @floatFromInt(species.len))));
+    pre_random_ct += 2;
+    for (0..pre_random_ct) |i| {
+        pre_random_specie[i] = [3]f32 { random.float(f32) * 360, float_range(random, 0.7, 1), float_range(random, 0.2, 1) };
+    }
     for (species) |*sp| {
-        const hsv = [3]f32 { random.float(f32) * 360, float_range(random, 0.5, 1), float_range(random, 0.5, 1) };
+        var hsv = pre_random_specie[random.int(u32) % pre_random_ct];
+        hsv[0] += float_range(random, -20, 20);
+        hsv[0] = @mod(hsv[0], 360);
         sp.color = m.rgb_from_hsv(hsv);
     }
 }
@@ -44,7 +59,7 @@ const Bound = struct {
     min: f32, max: f32,
 
     pub const Order = enum {
-        lt, gt, none, 
+        lt, gt, none,
     };
 
     pub fn init(left: f32, right: f32) Bound {
@@ -73,7 +88,7 @@ const particle_drag = 20;
 const r_force_radius       = Bound.init(0.03, 0.05);
 var   b_force_radius       = r_force_radius;
 const r_force_strength     = Bound.init(0.02, 0.3);
-var   b_force_strength     = r_force_strength;  
+var   b_force_strength     = r_force_strength;
 
 const b_collision_radius   = Bound.init(0.001, 0.029);
 const b_collision_strength = Bound.init(0.31, 0.8);
@@ -137,7 +152,7 @@ pub fn main(init: std.process.Init) !void {
     const particles_size = @sizeOf(Particle) * particles.len;
     const configs_size = MAX_PARTICLE_SPECIE*MAX_PARTICLE_SPECIE * @sizeOf(Force_Config);
     const species_size = MAX_PARTICLE_SPECIE * @sizeOf(Particle_Specie);
-    randomize_particle_specie(&species, rand);
+    randomize_particle_specie(species[0..specie_ct], rand);
     randomize_config(particle_force_configs[0..specie_ct*specie_ct], specie_ct, rand);
     generate_particle(&particles, specie_ct, rand);
 
@@ -234,7 +249,7 @@ pub fn main(init: std.process.Init) !void {
     var particle_constant = Particle_Constant {
         .camera = .{}, .specie_ct = specie_ct, .particle_ct = particle_ct,
         .collision_cfg = .{.radius = 0.02,.strength = 0.4}, .ping_pong = true,
-        .method = .grid, .aspect_ratio = vulkan.state.aspect_ratio, .dt = target_dt,
+        .method = .grid, .aspect_ratio = vulkan.state.aspect_ratio, .dt = 1.0/120.0,
     };
     var prev_mouse = V2 {0,0};
     while (r.RGFW_window_shouldClose(window) == 0) {
@@ -308,14 +323,9 @@ pub fn main(init: std.process.Init) !void {
         defer prev_mouse = UI.frame.mouse;
         UI.frame.mouse_delta = UI.frame.mouse-prev_mouse;
 
-        try vulkan.copy_buffer(staging_buf, grid_offsets_buf, @sizeOf(u32) * GRID_CELL_COUNT);
-        // const offsets = std.mem.bytesAsSlice(u32, std.mem.sliceAsBytes(staging_mapped));
-
-        // try vulkan.copy_buffer(staging_buf, grid_offsets_prefix_buf, @sizeOf(u32) * (GRID_CELL_COUNT + 1));
-        // std.log.info("grid_offset_prefix[1]={}", .{offsets[1]});
-        {
+        const compute_durations = blk: {
             try vulkan.compute_fence();
-            try vulkan.begin_dispatch();
+            const compute_durations = try vulkan.begin_dispatch();
 
             vulkan.push_constant(Particle_Constant, &particle_constant);
 
@@ -341,7 +351,8 @@ pub fn main(init: std.process.Init) !void {
             }
 
             try vulkan.end_dispatch();
-        }
+            break :blk compute_durations;
+        };
         try vulkan.begin_draw();
 
         vulkan.push_constant(Particle_Constant, &particle_constant);
@@ -351,71 +362,99 @@ pub fn main(init: std.process.Init) !void {
         draw.texture(.screen(), .{1,1,1,1}, vulkan.state.hdr_texture.view);
         if (display_gui) {
             vulkan.begin_camera(.{.pos = .{particle_constant.camera.pos[0],-particle_constant.camera.pos[1]}, .zoom = particle_constant.camera.zoom});
-            const thick = UI.theme.line_thick;
-            for (0..GRID_CELL_SIDE_COUNT+1) |i| {
-                const f: f32 = @floatFromInt(i);
-                draw.rectangle(.{.pos = .{-1,-1+f*GRID_CELL_SIZE-thick/2.0}, .size = .{2,thick}}, .{1,1,1,1});
-                draw.rectangle(.{.pos = .{-1+f*GRID_CELL_SIZE-thick/2.0,-1}, .size = .{thick,2}}, .{1,1,1,1});
-            }
+            // const thick = UI.theme.line_thick/3;
+            // for (0..GRID_CELL_SIDE_COUNT+1) |i| {
+            //     const f: f32 = @floatFromInt(i);
+            //     draw.rectangle(.{.pos = .{-1,-1+f*GRID_CELL_SIZE-thick/2.0}, .size = .{2,thick}}, .{1,1,1,1});
+            //     draw.rectangle(.{.pos = .{-1+f*GRID_CELL_SIZE-thick/2.0,-1}, .size = .{thick,2}}, .{1,1,1,1});
+            // }
             const camera_mouse = particle_constant.camera.untranslate(UI.frame.mouse);
-            if (m.cell_from_pos(camera_mouse)) |cell| {
+
+            try vulkan.copy_buffer(staging_buf, grid_offsets_buf, @sizeOf(u32) * GRID_CELL_COUNT);
+            const offsets = std.mem.bytesAsSlice(u32, std.mem.sliceAsBytes(staging_mapped));
+            const num_in_bin: u32 = if (m.cell_from_pos(camera_mouse)) |cell| blk: {
                 // log.info("camera mouse={}, cell={}", .{camera_mouse, cell});
                 const pos = m.splat2(GRID_CELL_SIZE)*@as(V2, @floatFromInt(cell)) + m.splat2(-1);
                 draw.rectangle(.{.pos = pos, .size = m.splat2(GRID_CELL_SIZE) }, .{1,0,0,0.2});
-                // const bin = m.bin_from_cell(cell);
-                // log.info("cell: {}, bin: {}, count: {}", .{ cell, bin, offsets[bin] });
-            }
+                const bin = m.bin_from_cell(cell);
+                break :blk offsets[bin];
+            } else 0;
             vulkan.end_camera();
-        }
-        // Right Panel
-        {
-            var layout = Layout { .x = draw.botright()[0] - 0.01, .y = draw.topleft()[1] + UI.theme.padding, .alignment = .right };
-            layout.text_fmt("FPS: {d:.0}", .{1.0/dt});
-            layout.text_fmt("Frame Time: {d:.3} ms", .{dt * std.time.ms_per_s});
-            layout.text_fmt("(Real: {d:.3} ms)", .{real_dt * std.time.ms_per_s});
-            layout.text_fmt("Grid Cell Size: {d:.3}, Count: {}", .{GRID_CELL_SIZE, GRID_CELL_COUNT});
-        }
-        // Left Panel
-        {
+            // Right Panel
+            {
+                var layout = Layout { .x = draw.botright()[0] - 0.01, .y = draw.topleft()[1] + UI.theme.padding, .alignment = .right };
+                layout.text_fmt("FPS: {d:.0}", .{1.0/dt});
+                layout.text_fmt("Frame Time: {d:.3} ms", .{dt * std.time.ms_per_s});
+                layout.text_fmt("(Real: {d:.3} ms)", .{real_dt * std.time.ms_per_s});
+                const compute_pass_name = [_][]const u8 {
+                    "Grid Offsets",
+                    "Prefix Sum",
+                    "Sort",
+                    "Interaction"
+                };
+                for (compute_durations, 0..) |d, i| {
+                    layout.text_fmt("[{}]{s}: {d:.3} ms", .{ i, compute_pass_name[i], d * std.time.ms_per_s });
+                }
+                layout.text_fmt("Grid Cell Size: {d:.3}, Count: {}", .{GRID_CELL_SIZE, GRID_CELL_COUNT});
+                layout.text_fmt("Particles in bin: {}", .{num_in_bin});
+            }
+            // Left Panel
+            {
 
-            var layout = Layout { .x = draw.topleft()[0] + 0.01, .y = draw.topleft()[1], .alignment = .left };
-            const spliter_w = 0.75;
-            layout.spliter(spliter_w);
-            
-            layout.slide_bar_with_title(f32, b_simulation_dt.min, b_simulation_dt.max, &particle_constant.dt, "Simulation Delta Time: {d:.4}");
-            _ = layout.row(0);
+                var layout = Layout { .x = draw.topleft()[0] + 0.01, .y = draw.topleft()[1], .alignment = .left };
+                const spliter_w = 0.75;
+                layout.spliter(spliter_w);
 
-            layout.slide_bar_with_title(u32, 3000, particles.len, &particle_ct, "Particle Count: {}");
-            _ = layout.row(0);
+                layout.slide_bar_with_title(f32, b_simulation_dt.min, b_simulation_dt.max, &particle_constant.dt, "Simulation Delta Time: {d:.4} s");
+                _ = layout.row(0);
 
-            layout.slide_bar_with_title(u32, 1, MAX_PARTICLE_SPECIE, &specie_ct, "Specie Count: {}");
-            _ = layout.row(0);
+                layout.slide_bar_with_title(u32, 3000, particles.len, &particle_ct, "Particle Count: {}");
+                _ = layout.row(0);
 
-            layout.slide_bar_with_title(f32,
-                b_collision_strength.min, b_collision_strength.max,
-                &particle_constant.collision_cfg.strength,
-                "Collision Strength: {d:.4}");
-            _ = layout.row(0);
+                layout.slide_bar_with_title(u32, 1, MAX_PARTICLE_SPECIE, &specie_ct, "Specie Count: {}");
+                _ = layout.row(0);
 
-            layout.slide_bar_with_title(f32,
-                b_collision_radius.min, b_collision_radius.max,
-                &particle_constant.collision_cfg.radius,
-                "Collision Radius: {d:.5}");
-            _ = layout.row(0);
+                layout.slide_bar_with_title(f32,
+                    b_collision_strength.min, b_collision_strength.max,
+                    &particle_constant.collision_cfg.strength,
+                    "Collision Strength: {d:.4}");
+                _ = layout.row(0);
 
-            layout.spliter(spliter_w);
-            layout.text("Interaction Force Randomizatin: (applied after regeneration)");
-            layout.text_fmt("Strength Range, {d:.4}  {d:.4}", .{b_force_strength.min, b_force_strength.max});
-            layout.double_slide_bar(f32,
-                r_force_strength.min, r_force_strength.max,
-                &b_force_strength.min, &b_force_strength.max);
-            _ = layout.row(0);
+                layout.slide_bar_with_title(f32,
+                    b_collision_radius.min, b_collision_radius.max,
+                    &particle_constant.collision_cfg.radius,
+                    "Collision Radius: {d:.5}");
+                _ = layout.row(0);
 
-            layout.text_fmt("Radius Range, {d:.4}  {d:.4}", .{b_force_radius.min, b_force_radius.max});
-            layout.double_slide_bar(f32,
-                r_force_radius.min, r_force_radius.max,
-                &b_force_radius.min, &b_force_radius.max);
+                layout.spliter(spliter_w);
+                layout.text("Interaction Force Randomizatin: (applied after regeneration)");
+                layout.text_fmt("Strength Range: {d:.4}  {d:.4}", .{b_force_strength.min, b_force_strength.max});
+                layout.double_slide_bar(f32,
+                    r_force_strength.min, r_force_strength.max,
+                    &b_force_strength.min, &b_force_strength.max);
+                _ = layout.row(0);
 
+                layout.text_fmt("Radius Range  : {d:.4}  {d:.4}", .{b_force_radius.min, b_force_radius.max});
+                layout.double_slide_bar(f32,
+                    r_force_radius.min, r_force_radius.max,
+                    &b_force_radius.min, &b_force_radius.max);
+                _ = layout.row(0);
+
+                layout.spliter(spliter_w);
+                const rect_size = [2]f32 {0.05,0.05};
+                var   pos = layout.row(rect_size[1]);
+                for (0..pre_random_ct) |i| {
+                    const rgb = m.rgb_from_hsv(pre_random_specie[i]);
+                    draw.rectangle(.{.pos=pos, .size=rect_size}, .{rgb[0],rgb[1],rgb[2],1});
+                    pos[0] += UI.theme.padding + rect_size[0];
+                }
+                pos = layout.row(rect_size[1]);
+                for (0..particle_constant.specie_ct) |i| {
+                    const rgb = species[i].color;
+                    draw.rectangle(.{.pos=pos, .size=rect_size}, .{rgb[0],rgb[1],rgb[2],1});
+                    pos[0] += UI.theme.padding + rect_size[0];
+                }
+            }
         }
         vulkan.end_2d();
 
@@ -506,7 +545,7 @@ pub const UI = struct {
     pub const theme = Theme {
         .line_thick = 0.01,
         .text_color = .{0.8,0.8,0.8,1},
-        .text_scale = 3,
+        .text_scale = 2,
         .padding = 0.02,
         .slide_bar_w = 0.3,
         .slide_bar_left_spacing = 0.15,
