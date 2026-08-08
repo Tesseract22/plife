@@ -47,6 +47,12 @@ pub inline fn splat3(a: f32) V3 {
     return @splat(a);
 }
 
+pub inline fn splat4(a: f32) V4 {
+    return @splat(a);
+}
+
+pub const cast = std.math.lossyCast;
+
 const driver = @import("main.zig");
 const std = @import("std");
 pub const GRID_CELL_SIDE_COUNT = driver.GRID_CELL_SIDE_COUNT;
@@ -72,6 +78,10 @@ pub inline fn cell_from_pos(pos: V2) ?@Vector(2, u32) {
 
 pub inline fn bin_from_cell(coord: [2]u32) u32 {
     return coord[1] * GRID_CELL_SIDE_COUNT + coord[0];
+}
+
+pub inline fn apply_aspect_ratio(pos: [2]f32, ratio: f32) [2]f32 {
+    return .{ pos[0]/ratio, pos[1] };
 }
 
 const V2 = @Vector(2, f32);

@@ -20,6 +20,11 @@ pub const Vertex = struct {
             .name = "particles2",
             .decoration = .{ .descriptor = .{ .set = 0, .binding = 1 } },
         });
+        const species = @extern(*addrspace(.storage_buffer) const Specie_Array , .{
+            .name = "species",
+            .decoration = .{ .descriptor = .{ .set = 0, .binding = 7 } },
+        });
+
         const frag_color = @extern(*addrspace(.output) V3, .{
             .name = "frag_color",
             .decoration = .{ .location = 0 },
@@ -33,7 +38,6 @@ pub const Vertex = struct {
             .decoration = .{ .location = 2 },
         });
 
-
         const camera = constant.camera;
 
         const off_i = spirv.vertex_index % driver.VERT_PER_PARTICLE;
@@ -41,13 +45,13 @@ pub const Vertex = struct {
 
         const particle = if (constant.ping_pong) particles1.ptr[i] else particles2.ptr[i];
 
-        center.* = camera.translate(particle.pos);
-        const pos_offset = center.* + (positions[off_i] * m.splat2(PARTICLE_SIZE)) * m.splat2(camera.zoom);
+        center.* = camera.translate(m.apply_aspect_ratio(particle.pos, constant.aspect_ratio));
+        const pos_offset = center.* + (m.apply_aspect_ratio(positions[off_i], constant.aspect_ratio) * m.splat2(PARTICLE_SIZE)) * m.splat2(camera.zoom);
         spirv.position_out.* = .{
             pos_offset[0], pos_offset[1], 0, 1
         };
         frag_pos.* = pos_offset;
-        frag_color.* = constant.species[particle.specie].color;
+        frag_color.* = species.ptr[particle.specie].color;
     }
 
     fn triangle() callconv(.spirv_vertex) void {
@@ -80,7 +84,7 @@ pub const Vertex = struct {
         tex_coord.* = in_tex_coord;
         var cam = constant.camera;
         cam.pos[1] = -cam.pos[1];
-        const pos_offset = cam.translate(pos);
+        const pos_offset = cam.translate(m.apply_aspect_ratio(pos, constant.aspect_ratio));
         spirv.position_out.* = .{
             pos_offset[0], pos_offset[1], 0, 1
         };
@@ -108,7 +112,8 @@ const Fragment = struct {
         });
 
         const constant = @extern(*addrspace(.push_constant) driver.Particle_Constant, .{.name = "push_constant"}).*;
-        const d = m.len(frag_pos.*-center.*);
+        const pos = m.apply_aspect_ratio(frag_pos.*, 1/constant.aspect_ratio);
+        const d = m.len(@as(V2, pos) - m.apply_aspect_ratio(center.*, 1/constant.aspect_ratio));
 
         const glow_radius = PARTICLE_SIZE/2.0 * constant.camera.zoom;
         const kernel_radius = PARTICLE_KERNEL_SIZE/2.0 * constant.camera.zoom;
@@ -208,7 +213,7 @@ pub const Compute = struct {
         // if (d > collision_max_dist) continue;
         const collision_force = linear_force(constant.collision_cfg, d);
 
-        const interact_cfg_ab = constant.particle_force_configs[a.specie * constant.specie_ct + b.specie];
+        const interact_cfg_ab = force_configs.ptr[a.specie * constant.specie_ct + b.specie];
         const interact_force_ab = linear_force(interact_cfg_ab, d);
 
         // if (d == 0) {
@@ -269,11 +274,15 @@ pub const Compute = struct {
         .name = "particles_sorted",
         .decoration = .{ .descriptor = .{ .set = 0, .binding = 5 } },
     });
+    const force_configs = @extern(*addrspace(.storage_buffer) Force_Config_Array , .{
+        .name = "force_configs",
+        .decoration = .{ .descriptor = .{ .set = 0, .binding = 6 } },
+    });
 
     pub fn main() callconv(.{ .spirv_kernel = .{.x=driver.KERNEL_WORKGROUP_X,.y=1,.z=1}}) void {
-        const dt = 1.0/120.0;
+        const dt = constant.dt;
         const i = spirv.global_invocation_id[0];
-        if (i >= particles_in.ptr.len) return;
+        if (i >= constant.particle_ct) return;
 
         var spd = particles_in.ptr[i].spd;
         var pos = particles_in.ptr[i].pos;
@@ -328,7 +337,7 @@ pub const Compute = struct {
 
     pub fn compute_grid_offsets() callconv(.{ .spirv_kernel = .{.x=driver.KERNEL_WORKGROUP_X,.y=1,.z=1}}) void {
         const i = spirv.global_invocation_id[0];
-        if (i >= particles_in.ptr.len) return;
+        if (i >= constant.particle_ct) return;
         const particle = particles_in.ptr[i];
         const cell = m.cell_from_pos(particle.pos).?;
         const bin = m.bin_from_cell(cell);
@@ -361,7 +370,7 @@ pub const Compute = struct {
 
     pub fn sort_particles() callconv(.{ .spirv_kernel = .{.x=driver.KERNEL_WORKGROUP_X,.y=1,.z=1}}) void {
         const i = spirv.global_invocation_id[0];
-        if (i >= particles_in.ptr.len) return;
+        if (i >= constant.particle_ct) return;
         const particle = particles_in.ptr[i];
         const cell = m.cell_from_pos(particle.pos).?;
         const bin = m.bin_from_cell(cell);
@@ -421,5 +430,7 @@ pub const Image = @SpirvType(.{ .image = .{
 pub const SampledImage = @SpirvType(.{ .sampled_image = Image });
 
 
-const Particle_Array = SpirvArray(driver.Particle);
-const U32_Array      = SpirvArray(u32);
+const Particle_Array     = SpirvArray(driver.Particle);
+const U32_Array          = SpirvArray(u32);
+const Force_Config_Array = SpirvArray(Force_Config);
+const Specie_Array       = SpirvArray(driver.Particle_Specie);

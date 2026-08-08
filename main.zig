@@ -1,5 +1,5 @@
 pub const KERNEL_WORKGROUP_X = 64;
-pub const MAX_PARTICLE_SPECIE = 4;
+pub const MAX_PARTICLE_SPECIE = 20;
 
 pub const GRID_CELL_SIDE_COUNT = 30;
 pub const GRID_CELL_COUNT      = GRID_CELL_SIDE_COUNT * GRID_CELL_SIDE_COUNT;
@@ -35,23 +35,57 @@ pub fn generate_particle(particles: []Particle, specie_count: usize, rand: std.R
     assert(specie_count <= MAX_PARTICLE_SPECIE);
     for (particles) |*p| {
         p.pos = .{ float_range(rand, -1, 1), float_range(rand, -1, 1) };
-        p.spd = .{ float_range(rand, -1, 1), float_range(rand, -1, 1) };
+        p.spd = .{ 0, 0 };
         p.specie = rand.int(u8) % @as(u8, @intCast(specie_count));
     }
 }
 
-const particle_drag = 20;
-const r_force_radius_max: f32 = 0.05;
-const r_force_radius_min: f32 = 0.01;
-const r_force_strength_max: f32 = 0.10;
-const r_force_strength_min: f32 = 0.08;
-const collision_cfg = Force_Config {
-    .radius = 0.015,
-    .strength = 0.4,
+const Bound = struct {
+    min: f32, max: f32,
+
+    pub const Order = enum {
+        lt, gt, none, 
+    };
+
+    pub fn init(left: f32, right: f32) Bound {
+        assert(left < right);
+        return .{ .min = left, .max = right };
+    }
+
+    pub fn comp(bound: Bound, f: f32) Order {
+        if (bound.max < f) return .lt;
+        if (bound.min > f) return .gt;
+        return .none;
+    }
+
+    pub fn comp_bound(bound: Bound, other: Bound) Order {
+        if (bound.max < other.min) return .lt;
+        if (bound.min > other.max) return .gt;
+        return .none;
+    }
+
+    pub fn random(bound: Bound, rand: std.Random) f32 {
+        return float_range(rand, bound.min, bound.max);
+    }
 };
 
+const particle_drag = 20;
+const r_force_radius       = Bound.init(0.03, 0.05);
+var   b_force_radius       = r_force_radius;
+const r_force_strength     = Bound.init(0.02, 0.3);
+var   b_force_strength     = r_force_strength;  
+
+const b_collision_radius   = Bound.init(0.001, 0.029);
+const b_collision_strength = Bound.init(0.31, 0.8);
+
+const b_simulation_dt      = Bound.init(0, 1.0/30.0);
+
 comptime {
-    assert(r_force_radius_min < GRID_CELL_SIZE);
+    if (r_force_radius.comp(GRID_CELL_SIZE) != .lt) {
+        std.debug.panic("maximum force radius is {}, but grid cell size is {}", .{ r_force_radius.max, GRID_CELL_SIZE});
+    }
+    assert(r_force_radius.comp_bound(b_collision_radius) == .gt);
+    assert(r_force_strength.comp_bound(b_collision_strength) == .lt);
 }
 
 fn random_sign(random: std.Random) f32 {
@@ -59,7 +93,7 @@ fn random_sign(random: std.Random) f32 {
 }
 
 pub fn randomize_config(particle_force_configs: []Force_Config, specie_ct: u32, rand: std.Random) void {
-    assert(particle_force_configs.len == specie_ct * specie_ct);
+    assert(particle_force_configs.len >= specie_ct * specie_ct);
     // particle_kind = random.int(u8) % 5 + 2;
     var count: usize = 0;
     for (0..specie_ct) |i| {
@@ -67,8 +101,8 @@ pub fn randomize_config(particle_force_configs: []Force_Config, specie_ct: u32, 
             const sign = if (i == j) -1 else random_sign(rand);
             particle_force_configs[count] =
                 .{
-                    .radius = float_range(rand, r_force_radius_min, r_force_radius_max),
-                    .strength = sign * float_range(rand, r_force_strength_min, r_force_strength_max),
+                    .radius = b_force_radius.random(rand),
+                    .strength = sign * b_force_strength.random(rand),
                 };
             count += 1;
         }
@@ -81,12 +115,12 @@ pub const Particle_Constant = extern struct {
     camera: Camera,
 
     ping_pong: bool,
-    species: [MAX_PARTICLE_SPECIE]Particle_Specie,
     specie_ct: u32,
     particle_ct: u32,
     collision_cfg: Force_Config,
-    particle_force_configs: [MAX_PARTICLE_SPECIE*MAX_PARTICLE_SPECIE]Force_Config,
     method: Method,
+    aspect_ratio: f32,
+    dt: f32,
 };
 
 pub fn main(init: std.process.Init) !void {
@@ -96,17 +130,21 @@ pub fn main(init: std.process.Init) !void {
     const rand = rand_backend.random();
 
     var   particles  : [80000]Particle = undefined;
+    var   particle_ct: u32 = particles.len;
     var   species    : [MAX_PARTICLE_SPECIE]Particle_Specie = undefined;
-    const specie_ct  : u32 = 4;
+    var   specie_ct  : u32 = 4;
     var   particle_force_configs : [MAX_PARTICLE_SPECIE*MAX_PARTICLE_SPECIE]Force_Config = undefined;
     const particles_size = @sizeOf(Particle) * particles.len;
+    const configs_size = MAX_PARTICLE_SPECIE*MAX_PARTICLE_SPECIE * @sizeOf(Force_Config);
+    const species_size = MAX_PARTICLE_SPECIE * @sizeOf(Particle_Specie);
     randomize_particle_specie(&species, rand);
     randomize_config(particle_force_configs[0..specie_ct*specie_ct], specie_ct, rand);
     generate_particle(&particles, specie_ct, rand);
 
 
-    const WINDOW_W = 1000;
+    const WINDOW_W = 1900;
     const WINDOW_H = 1000;
+    // const ASPECT_RATION = WINDOW_W/WINDOW_H;
     const APP_NAME = "Vulkan 1.0 Example";
     _ = r.RGFW_init(APP_NAME, 0);
     const window = r.RGFW_createWindow(APP_NAME, 0, 0,
@@ -133,6 +171,10 @@ pub fn main(init: std.process.Init) !void {
     defer part_buf1.destroy();
     const part_buf2 = try vulkan.create_storage_buffer(particles_size, true);
     defer part_buf2.destroy();
+    const force_configs_buf = try vulkan.create_storage_buffer(configs_size, false);
+    defer force_configs_buf.destroy();
+    const species_buf = try vulkan.create_storage_buffer(species_size, false);
+    defer species_buf.destroy();
     const grid_offsets_buf = try vulkan.create_buffer(
         GRID_CELL_COUNT * @sizeOf(u32), .{ .storage_buffer = true, .transfer_src = true, .transfer_dst = true }, .{ .device_local = true });
     defer grid_offsets_buf.destroy();
@@ -148,20 +190,24 @@ pub fn main(init: std.process.Init) !void {
     const part_sorted_buf = try vulkan.create_storage_buffer(particles_size, true);
     defer part_sorted_buf.destroy();
 
-    const staging_buf = try vulkan.create_staging_buffer(particles_size);
+    const staging_size = @max(@max(particles_size, configs_size), species_size);
+    const staging_buf = try vulkan.create_staging_buffer(staging_size);
     defer staging_buf.destroy();
 
-    const staging_mapped = try vulkan.map_mem(staging_buf.mem, Particle, particles.len);
-    @memcpy(staging_mapped, &particles);
-    device.unmapMemory(staging_buf.mem);
-
-    try vulkan.copy_buffer(part_buf1, staging_buf, particles_size);
-    try vulkan.copy_buffer(part_buf2, staging_buf, particles_size);
+    const staging_mapped = try vulkan.map_mem(staging_buf.mem, u8, staging_size);
+    defer device.unmapMemory(staging_buf.mem);
+    {
+        const size = vulkan.copy_to_bytes(staging_mapped, particles[0..particle_ct]);
+        try vulkan.copy_buffer(part_buf1, staging_buf, size);
+        try vulkan.copy_buffer(part_buf2, staging_buf, size);
+    }
+    try vulkan.upload_with_staging(force_configs_buf, staging_buf, staging_mapped, particle_force_configs[0..specie_ct*specie_ct]);
+    try vulkan.upload_with_staging(species_buf, staging_buf, staging_mapped, species[0..specie_ct]);
 
     try vulkan.init_particle_desc_set(
         .{part_buf1.buf, part_buf2.buf},
         grid_offsets_buf.buf, grid_offsets_prefix_buf.buf, grid_offsets_prefix_copy_buf.buf,
-        part_sorted_buf.buf);
+        part_sorted_buf.buf, force_configs_buf.buf, species_buf.buf);
     try vulkan.init_triangle_desc_set();
     try vulkan.init_pipeline_layout(@sizeOf(Particle_Constant));
     try vulkan.init_pipeline();
@@ -176,29 +222,35 @@ pub fn main(init: std.process.Init) !void {
 
     const target_fps = 60.0;
     const target_dt  = 1.0/target_fps;
-    var   dt: f32    = target_dt;
+    var   dt     : f32 = target_dt;
+    var   real_dt: f32 = target_dt;
 
-    var camera = Camera {};
     var camera_target = Camera {};
 
-    var ping_pong = true;
+    UI.init(init.gpa);
+    defer UI.deinit();
+
     var display_gui = false;
-    var method = Method.grid;
+    var particle_constant = Particle_Constant {
+        .camera = .{}, .specie_ct = specie_ct, .particle_ct = particle_ct,
+        .collision_cfg = .{.radius = 0.02,.strength = 0.4}, .ping_pong = true,
+        .method = .grid, .aspect_ratio = vulkan.state.aspect_ratio, .dt = target_dt,
+    };
+    var prev_mouse = V2 {0,0};
     while (r.RGFW_window_shouldClose(window) == 0) {
+        _ = UI.frame.arena.reset(.retain_capacity);
         // TODO: limit frame rate
         const start = std.Io.Timestamp.now(io, .boot);
         defer {
             const end = std.Io.Timestamp.now(io, .boot);
             dt = @as(f32, @floatFromInt(start.durationTo(end).nanoseconds)) / std.time.ns_per_s;
+            real_dt = dt;
             if (dt < target_dt) {
                 io.sleep(.{ .nanoseconds = @intFromFloat((target_dt - dt) * std.time.ns_per_s) }, .boot)
                     catch unreachable;
                 dt = target_dt;
             }
 
-        }
-        if (vulkan.state.frame_counter % 20 == 0) {
-            std.log.info("dt={}, fps={}", .{dt, 1.0/dt});
         }
 
         // FIXME: when window resized, we need to recreate swap chain
@@ -220,39 +272,47 @@ pub fn main(init: std.process.Init) !void {
             display_gui = !display_gui;
         }
         if (r.RGFW_isKeyPressed(r.RGFW_keyM) == 1) {
-            method = @enumFromInt((@intFromEnum(method) + 1) % 3);
+            particle_constant.method = @enumFromInt((@intFromEnum(particle_constant.method) + 1) % 3);
         }
 
+        // Update live
+
+        // Update on `R` or `shift+R`
         if (r.RGFW_isKeyPressed(r.RGFW_keyR) == 1) {
-            randomize_particle_specie(&species, rand);
-            randomize_config(particle_force_configs[0..specie_ct*specie_ct], specie_ct, rand);
-            generate_particle(&particles, specie_ct, rand);
-            @memcpy(staging_mapped, &particles);
-            try vulkan.copy_buffer(part_buf1, staging_buf, particles_size);
-            try vulkan.copy_buffer(part_buf2, staging_buf, particles_size);
+            if (r.RGFW_isKeyDown(r.RGFW_keyShiftL) == 1) {
+                particle_constant.specie_ct = specie_ct;
+                randomize_particle_specie(species[0..particle_constant.specie_ct], rand);
+                randomize_config(&particle_force_configs, particle_constant.specie_ct, rand);
+                try vulkan.upload_with_staging(force_configs_buf, staging_buf, staging_mapped, particle_force_configs[0..specie_ct*specie_ct]);
+                try vulkan.upload_with_staging(species_buf, staging_buf, staging_mapped, species[0..specie_ct]);
+            }
+            particle_constant.particle_ct = particle_ct;
+            generate_particle(&particles, particle_constant.specie_ct, rand);
+            {
+                const size = vulkan.copy_to_bytes(staging_mapped, particles[0..particle_ct]);
+                try vulkan.copy_buffer(part_buf1, staging_buf, size);
+                try vulkan.copy_buffer(part_buf2, staging_buf, size);
+            }
         }
 
         const scroll = get_mouse_scroll();
         const wheel = scroll[1];
         camera_target.zoom = std.math.clamp(@exp2(@log2(camera_target.zoom)+wheel*CAMERA_ZOOM_SPD), 0.5, 64.0);
 
-        camera.zoom = exp_smooth(camera.zoom, camera_target.zoom, dt * CAMERA_SMOOTH_SPD);
-        camera.pos[0] = exp_smooth(camera.pos[0], camera_target.pos[0], dt * CAMERA_SMOOTH_SPD);
-        camera.pos[1] = exp_smooth(camera.pos[1], camera_target.pos[1], dt * CAMERA_SMOOTH_SPD);
+        particle_constant.camera.zoom = exp_smooth(particle_constant.camera.zoom, camera_target.zoom, dt * CAMERA_SMOOTH_SPD);
+        particle_constant.camera.pos[0] = exp_smooth(particle_constant.camera.pos[0], camera_target.pos[0], dt * CAMERA_SMOOTH_SPD);
+        particle_constant.camera.pos[1] = exp_smooth(particle_constant.camera.pos[1], camera_target.pos[1], dt * CAMERA_SMOOTH_SPD);
 
         const mouse_screen = get_mouse(window);
-        const mouse = (mouse_screen / V2 {WINDOW_W, WINDOW_H})*m.splat2(2) - m.splat2(1);
+        UI.frame.mouse = ((mouse_screen / V2 {WINDOW_W, WINDOW_H})*m.splat2(2) - m.splat2(1)) * V2{vulkan.state.aspect_ratio, 1};
+        defer prev_mouse = UI.frame.mouse;
+        UI.frame.mouse_delta = UI.frame.mouse-prev_mouse;
 
         try vulkan.copy_buffer(staging_buf, grid_offsets_buf, @sizeOf(u32) * GRID_CELL_COUNT);
         // const offsets = std.mem.bytesAsSlice(u32, std.mem.sliceAsBytes(staging_mapped));
 
         // try vulkan.copy_buffer(staging_buf, grid_offsets_prefix_buf, @sizeOf(u32) * (GRID_CELL_COUNT + 1));
         // std.log.info("grid_offset_prefix[1]={}", .{offsets[1]});
-        const particle_constant = Particle_Constant {
-            .camera = camera, .species = species, .specie_ct = specie_ct, .particle_ct = particles.len,
-            .collision_cfg = collision_cfg, .particle_force_configs = particle_force_configs, .ping_pong = ping_pong,
-            .method = method,
-        };
         {
             try vulkan.compute_fence();
             try vulkan.begin_dispatch();
@@ -275,42 +335,92 @@ pub fn main(init: std.process.Init) !void {
             vulkan.dispatch_compute((particles.len+KERNEL_WORKGROUP_X-1)/KERNEL_WORKGROUP_X);
             vulkan.sync_buf(part_sorted_buf);
 
-            vulkan.use_compute(3);
-            vulkan.dispatch_compute((particles.len+KERNEL_WORKGROUP_X-1)/KERNEL_WORKGROUP_X);
+            if (particle_constant.dt != 0) {
+                vulkan.use_compute(3);
+                vulkan.dispatch_compute((particles.len+KERNEL_WORKGROUP_X-1)/KERNEL_WORKGROUP_X);
+            }
 
             try vulkan.end_dispatch();
         }
         try vulkan.begin_draw();
 
         vulkan.push_constant(Particle_Constant, &particle_constant);
-        vulkan.draw_particles_to_off_screen(@intCast(particles.len * VERT_PER_PARTICLE));
+        vulkan.draw_particles_to_off_screen(@intCast(particle_constant.particle_ct * VERT_PER_PARTICLE));
 
         vulkan.begin_2d();
-        vulkan.Draw.texture(.screen, .{1,1,1,1}, vulkan.state.hdr_texture.view);
+        draw.texture(.screen(), .{1,1,1,1}, vulkan.state.hdr_texture.view);
         if (display_gui) {
-            vulkan.begin_camera(.{.pos = .{camera.pos[0],-camera.pos[1]}, .zoom = camera.zoom});
-            const thick = 0.01;
+            vulkan.begin_camera(.{.pos = .{particle_constant.camera.pos[0],-particle_constant.camera.pos[1]}, .zoom = particle_constant.camera.zoom});
+            const thick = UI.theme.line_thick;
             for (0..GRID_CELL_SIDE_COUNT+1) |i| {
                 const f: f32 = @floatFromInt(i);
-                vulkan.Draw.rectangle(.{.pos = .{-1,-1+f*GRID_CELL_SIZE-thick/2.0}, .size = .{2,thick}}, .{1,1,1,1});
-                vulkan.Draw.rectangle(.{.pos = .{-1+f*GRID_CELL_SIZE-thick/2.0,-1}, .size = .{thick,2}}, .{1,1,1,1});
+                draw.rectangle(.{.pos = .{-1,-1+f*GRID_CELL_SIZE-thick/2.0}, .size = .{2,thick}}, .{1,1,1,1});
+                draw.rectangle(.{.pos = .{-1+f*GRID_CELL_SIZE-thick/2.0,-1}, .size = .{thick,2}}, .{1,1,1,1});
             }
-            const camera_mouse = camera.untranslate(mouse);
+            const camera_mouse = particle_constant.camera.untranslate(UI.frame.mouse);
             if (m.cell_from_pos(camera_mouse)) |cell| {
                 // log.info("camera mouse={}, cell={}", .{camera_mouse, cell});
                 const pos = m.splat2(GRID_CELL_SIZE)*@as(V2, @floatFromInt(cell)) + m.splat2(-1);
-                vulkan.Draw.rectangle(.{.pos = pos, .size = m.splat2(GRID_CELL_SIZE) }, .{1,0,0,0.2});
+                draw.rectangle(.{.pos = pos, .size = m.splat2(GRID_CELL_SIZE) }, .{1,0,0,0.2});
                 // const bin = m.bin_from_cell(cell);
                 // log.info("cell: {}, bin: {}, count: {}", .{ cell, bin, offsets[bin] });
             }
             vulkan.end_camera();
         }
-        //vulkan.Draw.texture(.{.pos = .{-1,-1}, .size = .{1,1}}, .{1,1,1,1}, vulkan.state.font.bitmap.view);
-        vulkan.Draw.text(.{-1,-1}, "Hello", 5, .{0.6,0.6,0.6,1});
+        // Right Panel
+        {
+            var layout = Layout { .x = draw.botright()[0] - 0.01, .y = draw.topleft()[1] + UI.theme.padding, .alignment = .right };
+            layout.text_fmt("FPS: {d:.0}", .{1.0/dt});
+            layout.text_fmt("Frame Time: {d:.3} ms", .{dt * std.time.ms_per_s});
+            layout.text_fmt("(Real: {d:.3} ms)", .{real_dt * std.time.ms_per_s});
+            layout.text_fmt("Grid Cell Size: {d:.3}, Count: {}", .{GRID_CELL_SIZE, GRID_CELL_COUNT});
+        }
+        // Left Panel
+        {
+
+            var layout = Layout { .x = draw.topleft()[0] + 0.01, .y = draw.topleft()[1], .alignment = .left };
+            const spliter_w = 0.75;
+            layout.spliter(spliter_w);
+            
+            layout.slide_bar_with_title(f32, b_simulation_dt.min, b_simulation_dt.max, &particle_constant.dt, "Simulation Delta Time: {d:.4}");
+            _ = layout.row(0);
+
+            layout.slide_bar_with_title(u32, 3000, particles.len, &particle_ct, "Particle Count: {}");
+            _ = layout.row(0);
+
+            layout.slide_bar_with_title(u32, 1, MAX_PARTICLE_SPECIE, &specie_ct, "Specie Count: {}");
+            _ = layout.row(0);
+
+            layout.slide_bar_with_title(f32,
+                b_collision_strength.min, b_collision_strength.max,
+                &particle_constant.collision_cfg.strength,
+                "Collision Strength: {d:.4}");
+            _ = layout.row(0);
+
+            layout.slide_bar_with_title(f32,
+                b_collision_radius.min, b_collision_radius.max,
+                &particle_constant.collision_cfg.radius,
+                "Collision Radius: {d:.5}");
+            _ = layout.row(0);
+
+            layout.spliter(spliter_w);
+            layout.text("Interaction Force Randomizatin: (applied after regeneration)");
+            layout.text_fmt("Strength Range, {d:.4}  {d:.4}", .{b_force_strength.min, b_force_strength.max});
+            layout.double_slide_bar(f32,
+                r_force_strength.min, r_force_strength.max,
+                &b_force_strength.min, &b_force_strength.max);
+            _ = layout.row(0);
+
+            layout.text_fmt("Radius Range, {d:.4}  {d:.4}", .{b_force_radius.min, b_force_radius.max});
+            layout.double_slide_bar(f32,
+                r_force_radius.min, r_force_radius.max,
+                &b_force_radius.min, &b_force_radius.max);
+
+        }
         vulkan.end_2d();
 
         try vulkan.end_draw();
-        ping_pong = !ping_pong;
+        particle_constant.ping_pong = !particle_constant.ping_pong;
     }
     try device.deviceWaitIdle();
 
@@ -328,6 +438,8 @@ const log = std.log;
 const fatal = std.process.fatal;
 const assert = std.debug.assert;
 const Camera = vulkan.Camera;
+const draw = vulkan.Draw;
+const Rect = vulkan.Rect;
 
 const V2 = @Vector(2, f32);
 const V3 = @Vector(3, f32);
@@ -352,9 +464,202 @@ pub fn exp_smooth(current: f32, target: f32, delta: f32) f32 {
     return current + (target - current) * (1 - @exp(-delta));
 }
 
+//
+// RGFW Wrappers
+//
+
 pub fn get_mouse(win: *r.RGFW_window) V2 {
     var x: i32 = 0;
     var y: i32 = 0;
     _ = r.RGFW_window_getMouse(win, &x, &y);
     return .{@floatFromInt(x), @floatFromInt(y)};
 }
+
+pub fn get_mouse_delta() [2]f32 {
+    var x: f32 = 0;
+    var y: f32 = 0;
+    r.RGFW_getMouseVector(&x, &y);
+    return .{x,y};
+}
+
+pub fn is_mouse_pressed() bool {
+    return r.RGFW_isMousePressed(r.RGFW_mouseLeft) != 0;
+}
+
+pub fn is_mouse_down() bool {
+    return r.RGFW_isMouseDown(r.RGFW_mouseLeft) != 0;
+}
+
+pub const Theme = struct {
+    line_thick: f32,
+    text_color : [4]f32,
+    text_scale : f32,
+    padding: f32,
+    slide_bar_w: f32,
+    slide_bar_left_spacing: f32,
+    slide_bar_right_spacing: f32,
+};
+
+pub const UI = struct {
+    pressed: bool = false,
+    pub const Alignment = enum { left, right };
+    pub const theme = Theme {
+        .line_thick = 0.01,
+        .text_color = .{0.8,0.8,0.8,1},
+        .text_scale = 3,
+        .padding = 0.02,
+        .slide_bar_w = 0.3,
+        .slide_bar_left_spacing = 0.15,
+        .slide_bar_right_spacing = 0.05,
+    };
+    pub var frame: struct {
+        arena: std.heap.ArenaAllocator = undefined,
+        mouse: [2]f32 = .{0,0},
+        mouse_delta: [2]f32 = .{0,0},
+    } = .{};
+
+    pub var persistents: std.hash_map.AutoHashMap(*anyopaque, UI) = undefined;
+
+    pub fn init(gpa: std.mem.Allocator) void {
+        frame.arena = .init(gpa);
+        persistents = .init(gpa);
+    }
+
+    pub fn deinit() void {
+        frame.arena.deinit();
+        persistents.deinit();
+    }
+
+    pub fn font_h() f32 {
+        return draw.measure_font_h(theme.text_scale);
+    }
+
+    pub fn alloc_print(comptime fmt: []const u8, args: anytype) []const u8 {
+        return std.fmt.allocPrint(frame.arena.allocator(), fmt, args) catch @panic("OOM");
+    }
+
+    pub fn text_fmt(pos: [2]f32, alignment: Alignment, comptime fmt: []const u8, args: anytype) void {
+        text(pos, alignment, alloc_print(fmt, args));
+    }
+
+    pub fn text(pos: [2]f32, alignment: Alignment, str: []const u8) void {
+        var aligned_pos = pos;
+        switch (alignment) {
+            .left => {},
+            .right => aligned_pos[0] -= draw.measure_text(str, UI.theme.text_scale)[0],
+        }
+        draw.text(aligned_pos, str, UI.theme.text_scale, UI.theme.text_color);
+    }
+};
+
+pub const Layout = struct {
+    x: f32,
+    y: f32,
+    alignment: UI.Alignment,
+
+    pub fn row(layout: *Layout, y: f32) [2]f32 {
+        const origin_y = layout.y;
+        layout.y += y + UI.theme.padding;
+        return .{layout.x, origin_y};
+    }
+
+    pub fn spliter(layout: *Layout, w: f32) void {
+        const spliter_pos = layout.row(0);
+        draw.rectangle(.{.pos=spliter_pos, .size = .{w,UI.theme.line_thick}}, UI.theme.text_color);
+    }
+
+    pub fn text_fmt(layout: *Layout, comptime fmt: []const u8, args: anytype) void {
+        layout.text(std.fmt.allocPrint(UI.frame.arena.allocator(), fmt, args) catch @panic("OOM"));
+    }
+
+    pub fn text(layout: *Layout, str: []const u8) void {
+        const scale = UI.theme.text_scale;
+        const size = draw.measure_text(str, scale);
+        const pos = layout.row(size[1]);
+
+        UI.text(pos, layout.alignment, str);
+    }
+
+    pub fn slide_bar_with_title(layout: *Layout, comptime T: type, left: T, right: T, val: *T, comptime fmt: []const u8) void {
+        layout.text_fmt(fmt, .{val.*});
+        slide_bar(layout, T, left, right, val);
+    }
+
+    pub fn slide_bar(layout: *Layout, comptime T: type, left: T, right: T, val: *T) void {
+        const gop = UI.persistents.getOrPut(val) catch @panic("OOM");
+        const ui = gop.value_ptr;
+        if (!gop.found_existing) {
+            ui.* = .{};
+        }
+
+        const font_h = UI.font_h();
+        var pos = layout.row(font_h);
+
+        UI.text_fmt(pos, .left, "{d:.4}", .{left});
+        pos[0] += UI.theme.slide_bar_left_spacing;
+
+        const slide_bar_w = UI.theme.slide_bar_w;
+        const slide_rect = Rect {.pos=pos, .size=.{slide_bar_w, font_h}};
+        draw.rectangle(slide_rect, .{0.3,0.3,0.3,1});
+        slide_bar_btn(T, ui, slide_rect, left, right, left, right, val);
+        pos[0] += slide_bar_w + UI.theme.slide_bar_right_spacing;
+
+        UI.text_fmt(pos, .left, "{d:.4}", .{right});
+    }
+
+    fn slide_bar_btn(comptime T: type, ui: *UI, slide_rect: Rect, left: T, right: T, clamp_left: T, clamp_right: T, val1: *T) void {
+        var i = m.cast(f32, val1.*-left)/m.cast(f32, right-left);
+
+        const pos = slide_rect.pos;
+        const slide_bar_w = slide_rect.size[0];
+        const slide_btn_size = [2]f32 { slide_bar_w / 8.0, slide_rect.size[1] * 1.5 };
+
+        const btn_rect = Rect.from_center(.{pos[0]+i*slide_bar_w, pos[1]+slide_rect.size[1]/2}, slide_btn_size);
+        var btn_color: V4 = UI.theme.text_color;
+        if (btn_rect.point_in(UI.frame.mouse) or ui.pressed) {
+            if (is_mouse_down()) {
+                ui.pressed = true;
+                btn_color *= V4 {0.1,0.1,0.1,1};
+                i = @max((UI.frame.mouse[0] - slide_rect.pos[0]) / slide_rect.size[0], 0);
+                val1.* = m.cast(T, i * m.cast(f32, right-left) + m.cast(f32, left));
+                val1.* = std.math.clamp(val1.*, clamp_left, clamp_right);
+            } else {
+                ui.pressed = false;
+                btn_color *= m.splat4(1.2);
+            }
+        }
+        draw.rectangle(btn_rect, btn_color);
+    }
+
+    pub fn double_slide_bar(layout: *Layout, comptime T: type, left: T, right: T, val1: *T, val2: *T) void {
+        UI.persistents.ensureUnusedCapacity(2) catch @panic("OOM");
+        const gop1 = UI.persistents.getOrPut(val1) catch unreachable;
+        const ui1 = gop1.value_ptr;
+        if (!gop1.found_existing) {
+            ui1.* = .{};
+        }
+
+        const gop2 = UI.persistents.getOrPut(val2) catch unreachable;
+        const ui2 = gop2.value_ptr;
+        if (!gop2.found_existing) {
+            ui2.* = .{};
+        }
+
+        const font_h = UI.font_h();
+        var pos = layout.row(font_h);
+
+        UI.text_fmt(pos, .left, "{d:.4}", .{left});
+        pos[0] += UI.theme.slide_bar_left_spacing;
+
+        const slide_bar_w = UI.theme.slide_bar_w;
+        const slide_rect = Rect {.pos=pos, .size=.{slide_bar_w, font_h}};
+        draw.rectangle(slide_rect, .{0.3,0.3,0.3,1});
+
+        slide_bar_btn(T, ui1, slide_rect, left, right, left, val2.* * 0.9, val1); 
+        slide_bar_btn(T, ui2, slide_rect, left, right, val1.* * 1.1, right, val2); 
+
+        pos[0] += slide_bar_w + UI.theme.slide_bar_right_spacing;
+
+        UI.text_fmt(pos, .left, "{d:.4}", .{right});
+    }
+};

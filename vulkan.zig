@@ -22,6 +22,7 @@ present_mode      : v.PresentModeKHR = undefined,
 extent            : v.Extent2D = undefined,
 viewport          : v.Viewport = undefined,
 scissor           : v.Rect2D = undefined,
+aspect_ratio      : f32 = 1,
 
 device_handle     : v.Device = .null_handle,
 device_wrapper    : v.DeviceWrapper = undefined,
@@ -83,6 +84,7 @@ per_frame: struct {
     vertexes: std.ArrayList(Vertex_Data) = .empty,
     vert_ct: u32 = 0,
     triangle_texture_ct: u32 = 0,
+    curr_texture: v.ImageView = .null_handle,
 
     camera: Camera = .init,
     cmd: v.CommandBuffer = .null_handle,
@@ -303,6 +305,8 @@ pub fn init_device(window_width: u32, window_height: u32) !Device {
                 .width = std.math.clamp(window_width, state.surface_details.min_image_extent.width, state.surface_details.max_image_extent.width),
                 .height = std.math.clamp(window_height, state.surface_details.min_image_extent.height, state.surface_details.max_image_extent.height),
             };
+    state.aspect_ratio = @as(f32, @floatFromInt(state.extent.width)) / @as(f32, @floatFromInt(state.extent.height));
+    log.info("window width={}, height={}, aspect_ratio={}", .{ state.extent.width, state.extent.height, state.aspect_ratio });
 
     state.device_handle = try state.instance.createDevice(state.physical_device, &device_create_info, null);
     state.device_wrapper = v.DeviceWrapper.load(state.device_handle, state.instance.wrapper.dispatch.vkGetDeviceProcAddr.?);
@@ -677,7 +681,7 @@ pub fn init_particle_desc_set(
     ping_pong: [MAX_FRAMES_IN_FLIGHT]v.Buffer,
     grid_offsets: v.Buffer,
     grid_offsets_prefix: v.Buffer, grid_offsets_prefix_copy: v.Buffer,
-    part_sorted: v.Buffer) !void {
+    part_sorted: v.Buffer, force_configs: v.Buffer, species: v.Buffer) !void {
     const device = state.device;
     const bindings = [_]v.DescriptorSetLayoutBinding{
         .{ // particles ping buffer
@@ -702,7 +706,7 @@ pub fn init_particle_desc_set(
             .binding = 3,
             .descriptor_type = .storage_buffer,
             .descriptor_count = 1,
-            .stage_flags = .{ .vertex  = true, .compute = true },
+            .stage_flags = .{ .vertex  = true, .compute = true }, // TODO: remove vertex bit
         },
         .{ // grid offsets prefix buffer
             .binding = 4,
@@ -716,6 +720,18 @@ pub fn init_particle_desc_set(
             .descriptor_count = 1,
             .stage_flags = .{ .vertex  = true, .compute = true },
         },
+        .{ // force configs
+            .binding = 6,
+            .descriptor_type = .storage_buffer,
+            .descriptor_count = 1,
+            .stage_flags = .{ .vertex  = true, .compute = true },
+        },
+        .{ // species
+            .binding = 7,
+            .descriptor_type = .storage_buffer,
+            .descriptor_count = 1,
+            .stage_flags = .{ .vertex  = true, .compute = true },
+        },
     };
 
     state.particle_desc_set_layout = try state.device.createDescriptorSetLayout(&.{
@@ -724,6 +740,14 @@ pub fn init_particle_desc_set(
     }, null);
 
     const pool_sizes = [_]v.DescriptorPoolSize {
+        .{
+            .type = .storage_buffer,
+            .descriptor_count = 2,
+        },
+        .{
+            .type = .storage_buffer,
+            .descriptor_count = 2,
+        },
         .{
             .type = .storage_buffer,
             .descriptor_count = 2,
@@ -799,6 +823,16 @@ pub fn init_particle_desc_set(
             },
             .{
                 .buffer = part_sorted,
+                .offset = 0,
+                .range = v.WHOLE_SIZE,
+            },
+            .{
+                .buffer = force_configs,
+                .offset = 0,
+                .range = v.WHOLE_SIZE,
+            },
+            .{
+                .buffer = species,
                 .offset = 0,
                 .range = v.WHOLE_SIZE,
             },
@@ -1023,7 +1057,7 @@ pub fn init_pipeline() !void {
         .render_pass       = state.render_pass,
         .layout            = state.triangle_pl_layout,
     });
-    const MAX_VERT_LEN = 1024;
+    const MAX_VERT_LEN = 1 << 16;
     for (&state.graphics_vert_bufs, &state.graphics_vert_maps) |*buf, *map| {
         buf.* = try create_buffer(
             MAX_VERT_LEN*@sizeOf(Vertex_Data),
@@ -1209,6 +1243,23 @@ pub fn copy_buffer(dst: Buffer, src: Buffer, size: usize) !void {
     try end_tmp_cmd(cmd);
 }
 
+pub fn copy_to_bytes(mapped: []u8, data: anytype) u32 {
+    const len = data.len;
+    const info = @typeInfo(@TypeOf(data));
+    const T = switch (info) {
+        .pointer => |ptr| ptr.child,
+        else => @compileError("`data` must be Slice"),
+    };
+    const ptr: [*]T = @alignCast(@ptrCast(mapped.ptr));
+    @memcpy(ptr[0..len], data);
+    return @intCast(len * @sizeOf(T));
+}
+
+pub fn upload_with_staging(dst: Buffer, staging: Buffer, mapped: []u8, data: anytype) !void {
+    const size = copy_to_bytes(mapped, data);
+    try copy_buffer(dst, staging, size);
+}
+
 pub fn map_mem(mem: v.DeviceMemory, comptime T: type, len: usize) ![]T {
     const device = state.device;
     const size = @sizeOf(T) * len;
@@ -1268,6 +1319,7 @@ pub fn begin_2d() void {
     const frame_buffer = state.frame_buffers[image_idx];
 
     state.per_frame.vert_ct = 0;
+    state.per_frame.curr_texture = .null_handle;
 
     device.cmdBeginRenderPass(cmd, &.{
         .render_pass = state.render_pass, .framebuffer = frame_buffer,
@@ -1316,7 +1368,10 @@ pub fn draw_particles_to_off_screen(
         .render_pass = state.off_screen_render_pass, .framebuffer = state.hdr_frame_buffer,
         .render_area = .{
             .offset = .{.x=0,.y=0},
-            .extent = state.extent,
+            .extent = .{
+                .width = state.extent.width,
+                .height = state.extent.height,
+            },
         },
         .clear_value_count = 1,
         .p_clear_values = &.{
@@ -1451,13 +1506,29 @@ pub fn end_dispatch() !void {
 }
 
 pub const Rect = struct {
-    pos: [2]f32,
+    pos: [2]f32, // topleft
     size: [2]f32,
 
-    pub const screen = Rect {
-        .pos = .{-1,-1},
-        .size = .{2,2},
-    };
+    pub fn screen() Rect {
+        return .{
+            .pos = .{-state.aspect_ratio,-1},
+            .size = .{2*state.aspect_ratio,2},
+        };
+    }
+
+    pub fn from_center(pos: [2]f32, size: [2]f32) Rect {
+        return .{
+            .pos = @as(V2, pos) - @as(V2, size)/m.splat2(2),
+            .size = size,
+        };
+    }
+
+    pub fn point_in(rect: Rect, p: [2]f32) bool {
+        return  rect.pos[0] <= p[0] and rect.pos[0]+rect.size[0] >= p[0]
+            and rect.pos[1] <= p[1] and rect.pos[1]+rect.size[1] >= p[1];
+
+    }
+
 };
 
 pub const Color = [4]f32;
@@ -1467,6 +1538,7 @@ const V4 = @Vector(4, f32);
 
 pub const Triangle_Constant = extern struct {
     pure_color: u32,
+    aspect_ratio: f32,
     camera: Camera,
 };
 
@@ -1519,6 +1591,20 @@ pub const Draw = struct {
         state.per_frame.vert_ct += vert_ct;
     }
 
+    pub fn topleft() [2]f32 {
+        return .{
+            -state.aspect_ratio,
+            -1,
+        };
+    }
+
+    pub fn botright() [2]f32 {
+        return .{
+            state.aspect_ratio,
+            1,
+        };
+    }
+
     pub fn rectangle(rect: Rect, color: Color) void {
         texture(rect, color, null);
     }
@@ -1544,15 +1630,19 @@ pub const Draw = struct {
     }
 
     fn prepare_texture(tex: ?v.ImageView) void {
+        var constant = Triangle_Constant { .pure_color = 0, .camera = state.per_frame.camera, .aspect_ratio = state.aspect_ratio };
         if (tex) |tex_inner| {
-            const texture_ct = &state.per_frame.triangle_texture_ct;
-            write_texture_to_descriptor(texture_ct.*, tex_inner);
-            state.device.cmdBindDescriptorSets(state.per_frame.cmd, .graphics, state.triangle_pl_layout, 0, state.triangle_desc_set[texture_ct.*..][0..1], null);
-            push_constant(Triangle_Constant, &.{ .pure_color = 0, .camera = state.per_frame.camera });
-            texture_ct.* += 1;
+            if (tex_inner != state.per_frame.curr_texture) {
+                state.per_frame.curr_texture = tex_inner;
+                const texture_ct = &state.per_frame.triangle_texture_ct;
+                write_texture_to_descriptor(texture_ct.*, tex_inner);
+                state.device.cmdBindDescriptorSets(state.per_frame.cmd, .graphics, state.triangle_pl_layout, 0, state.triangle_desc_set[texture_ct.*..][0..1], null);
+                texture_ct.* += 1;
+            }
         } else {
-            push_constant(Triangle_Constant, &.{ .pure_color = 1, .camera = state.per_frame.camera });
+            constant.pure_color = 1;
         }
+        push_constant(Triangle_Constant, &constant);
     }
 
     // pub fn line(start: V2, end: V2, thick: f32, color: Color) void {
@@ -1560,6 +1650,24 @@ pub const Draw = struct {
     //     const orthoganal_l = m.normalize(.{ l[1], -l[0] });
     //     const pos = start - orthoganal_l * m.splat2(thick/2);
     // }
+
+    pub fn measure_font_h(scale: f32) f32 {
+        const font = state.font;
+        const pixel_scale = 1.0/@as(f32, @floatFromInt(state.extent.width)) * scale;
+        return pixel_scale * font.size/2;
+    }
+
+    pub fn measure_text(str: []const u8, scale: f32) [2]f32 {
+        const font = state.font;
+        const pixel_scale = 1.0/@as(f32, @floatFromInt(state.extent.width)) * scale;
+        var local_pos: f32 = 0;
+        for (str) |ch| {
+            const packed_char = font.packed_chars[ch - font.code_first_char];
+            const advance = packed_char.xadvance * pixel_scale;
+            local_pos += advance;
+        }
+        return .{local_pos, measure_font_h(scale)};
+    }
 
     pub fn text(pos: [2]f32, str: []const u8, scale: f32, color: [4]f32) void {
         const font = state.font;
@@ -1574,14 +1682,14 @@ pub const Draw = struct {
             const aligned_quad = font.aligned_quads[ch - font.code_first_char];
 
             const advance = packed_char.xadvance * pixel_scale;
-            const w = 
+            const w =
                 @as(f32, @floatFromInt(packed_char.x1 - packed_char.x0))
                 * pixel_scale;
-            const h = 
+            const h =
                 @as(f32, @floatFromInt(packed_char.y1 - packed_char.y0))
                 * pixel_scale;
             const left = local_pos[0] + (packed_char.xoff * pixel_scale);
-            const bot = local_pos[1] - 
+            const bot = local_pos[1] -
                 (packed_char.yoff * pixel_scale) - @as(f32, @floatFromInt(packed_char.y1 - packed_char.y0))
                 * pixel_scale;
             _ = bot;
