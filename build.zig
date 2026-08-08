@@ -17,7 +17,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("main.zig"),
     });
     mod.addAnonymousImport("shader.spv", .{
-        .root_source_file = compile_shader(b, spirv_target, optimize, b.path("shader.zig"), "shader.spv"),
+        .root_source_file = compile_shader(b, spirv_target, .debug, b.path("shader.zig"), "shader.spv"),
     });
 
     const vulkan_path = b.graph.cwdRelativePath("C:/VulkanSDK/1.4.350.0/");

@@ -247,7 +247,6 @@ pub const Compute = struct {
     }
 
     // TODO: make this configurable from CPU
-    const PARTICLE_DRAG = 40;
     const boundary_mode: enum { clamp, wrap } = .wrap;
 
     const particles_in = @extern(*addrspace(.storage_buffer) Particle_Array , .{
@@ -288,26 +287,21 @@ pub const Compute = struct {
         var pos = particles_in.ptr[i].pos;
 
         // spd = spd + compute_interaction_with_range(i, 0, particles_in.ptr.len) * m.splat2(dt);
-                const cell = m.cell_from_pos(pos).?;
-                const cell_i: @Vector(2, f32) = .{@floatFromInt(cell[0]), @floatFromInt(cell[1])};
-                inline for (0..3) |x| {
-                    inline for (0..3) |y| {
-                        const neighbor_i = @Vector(2, f32) {cell_i[0]+x-1, cell_i[1]+y-1};
-                        if (neighbor_i[0] >= driver.GRID_CELL_SIDE_COUNT or neighbor_i[0] < 0) {} 
-                        else if (neighbor_i[1] >= driver.GRID_CELL_SIDE_COUNT or neighbor_i[1] < 0) {}
-                        else {
-                            const bin = m.bin_from_cell(.{ @intFromFloat(neighbor_i[0]), @intFromFloat(neighbor_i[1]) });
-                            spd = spd + compute_interaction_with_bin(i, bin) * m.splat2(dt);
-                        }
-                    }
+        const cell = m.cell_from_pos(pos).?;
+        const cell_i: @Vector(2, f32) = .{@floatFromInt(cell[0]), @floatFromInt(cell[1])};
+        inline for (0..3) |x| {
+            inline for (0..3) |y| {
+                const neighbor_i = @Vector(2, f32) {cell_i[0]+x-1, cell_i[1]+y-1};
+                if (neighbor_i[0] >= driver.GRID_CELL_SIDE_COUNT or neighbor_i[0] < 0) {} 
+                else if (neighbor_i[1] >= driver.GRID_CELL_SIDE_COUNT or neighbor_i[1] < 0) {}
+                else {
+                    const bin = m.bin_from_cell(.{ @intFromFloat(neighbor_i[0]), @intFromFloat(neighbor_i[1]) });
+                    spd = spd + compute_interaction_with_bin(i, bin) * m.splat2(dt);
                 }
-                // for (0..grid_offsets.ptr.len) |bin| {
-                //     spd = spd + compute_interaction_with_bin(i, bin) * m.splat2(dt);
-                // }
-
-        // const bin = m.bin_from_cell(cell);
+            }
+        }
         pos = pos + m.splat2(dt) * spd;
-        spd = spd * m.splat2(@exp(-PARTICLE_DRAG*dt*m.len(spd)));
+        spd = spd * m.splat2(@exp(-constant.drag*dt*m.len(spd)));
         switch (boundary_mode) {
             .clamp => {
                 if (pos[1] < -1) {

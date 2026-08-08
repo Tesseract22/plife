@@ -84,7 +84,6 @@ const Bound = struct {
     }
 };
 
-const particle_drag = 20;
 const r_force_radius       = Bound.init(0.03, 0.05);
 var   b_force_radius       = r_force_radius;
 const r_force_strength     = Bound.init(0.02, 0.3);
@@ -93,7 +92,9 @@ var   b_force_strength     = r_force_strength;
 const b_collision_radius   = Bound.init(0.001, 0.029);
 const b_collision_strength = Bound.init(0.31, 0.8);
 
-const b_simulation_dt      = Bound.init(0, 1.0/30.0);
+const b_drag               = Bound.init(0, 100);
+
+const b_simulation_dt      = Bound.init(0, 1.0/60.0);
 
 comptime {
     if (r_force_radius.comp(GRID_CELL_SIZE) != .lt) {
@@ -129,6 +130,7 @@ pub const Method = enum(u32) { none, brute, grid };
 pub const Particle_Constant = extern struct {
     camera: Camera,
 
+    drag: f32,
     ping_pong: bool,
     specie_ct: u32,
     particle_ct: u32,
@@ -145,7 +147,7 @@ pub fn main(init: std.process.Init) !void {
     const rand = rand_backend.random();
 
     var   particles  : [80000]Particle = undefined;
-    var   particle_ct: u32 = particles.len;
+    var   particle_ct: u32 = particles.len/2;
     var   species    : [MAX_PARTICLE_SPECIE]Particle_Specie = undefined;
     var   specie_ct  : u32 = 4;
     var   particle_force_configs : [MAX_PARTICLE_SPECIE*MAX_PARTICLE_SPECIE]Force_Config = undefined;
@@ -248,7 +250,7 @@ pub fn main(init: std.process.Init) !void {
     var display_gui = false;
     var particle_constant = Particle_Constant {
         .camera = .{}, .specie_ct = specie_ct, .particle_ct = particle_ct,
-        .collision_cfg = .{.radius = 0.02,.strength = 0.4}, .ping_pong = true,
+        .collision_cfg = .{.radius = 0.02,.strength = 0.4}, .drag = 20, .ping_pong = true,
         .method = .grid, .aspect_ratio = vulkan.state.aspect_ratio, .dt = 1.0/120.0,
     };
     var prev_mouse = V2 {0,0};
@@ -414,6 +416,9 @@ pub fn main(init: std.process.Init) !void {
                 layout.slide_bar_with_title(u32, 1, MAX_PARTICLE_SPECIE, &specie_ct, "Specie Count: {}");
                 _ = layout.row(0);
 
+                layout.slide_bar_with_title(f32, b_drag.min, b_drag.max, &particle_constant.drag, "Drag: {d:.4}");
+                _ = layout.row(0);
+
                 layout.slide_bar_with_title(f32,
                     b_collision_strength.min, b_collision_strength.max,
                     &particle_constant.collision_cfg.strength,
@@ -434,7 +439,7 @@ pub fn main(init: std.process.Init) !void {
                     &b_force_strength.min, &b_force_strength.max);
                 _ = layout.row(0);
 
-                layout.text_fmt("Radius Range  : {d:.4}  {d:.4}", .{b_force_radius.min, b_force_radius.max});
+                layout.text_fmt("Radius   Range: {d:.4}  {d:.4}", .{b_force_radius.min, b_force_radius.max});
                 layout.double_slide_bar(f32,
                     r_force_radius.min, r_force_radius.max,
                     &b_force_radius.min, &b_force_radius.max);
@@ -603,7 +608,7 @@ pub const Layout = struct {
     }
 
     pub fn spliter(layout: *Layout, w: f32) void {
-        const spliter_pos = layout.row(0);
+        const spliter_pos = layout.row(UI.theme.line_thick);
         draw.rectangle(.{.pos=spliter_pos, .size = .{w,UI.theme.line_thick}}, UI.theme.text_color);
     }
 
