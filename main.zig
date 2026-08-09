@@ -109,13 +109,13 @@ fn random_sign(random: std.Random) f32 {
     return if (random.boolean()) 1 else -1;
 }
 
-pub fn randomize_config(particle_force_configs: []Force_Config, specie_ct: u32, rand: std.Random) void {
+pub fn randomize_config(particle_force_configs: []Force_Config, specie_ct: u32, always_self_attract: bool, rand: std.Random) void {
     assert(particle_force_configs.len >= specie_ct * specie_ct);
     // particle_kind = random.int(u8) % 5 + 2;
     var count: usize = 0;
     for (0..specie_ct) |i| {
         for (0..specie_ct) |j| {
-            const sign = if (i == j) -1 else random_sign(rand);
+            const sign = if (always_self_attract and i == j) -1 else random_sign(rand);
             particle_force_configs[count] =
                 .{
                     .radius = b_force_radius.random(rand),
@@ -157,11 +157,13 @@ pub fn main(init: std.process.Init) !void {
     var   species    : [MAX_PARTICLE_SPECIE]Particle_Specie = undefined;
     var   specie_ct  : u32 = 4;
     var   particle_force_configs : [MAX_PARTICLE_SPECIE*MAX_PARTICLE_SPECIE]Force_Config = undefined;
+    var   always_self_attract = true;
+
     const particles_size = @sizeOf(Particle) * particles.len;
     const configs_size = MAX_PARTICLE_SPECIE*MAX_PARTICLE_SPECIE * @sizeOf(Force_Config);
     const species_size = MAX_PARTICLE_SPECIE * @sizeOf(Particle_Specie);
     randomize_particle_specie(species[0..specie_ct], rand);
-    randomize_config(particle_force_configs[0..specie_ct*specie_ct], specie_ct, rand);
+    randomize_config(particle_force_configs[0..specie_ct*specie_ct], specie_ct, always_self_attract, rand);
     generate_particle(&particles, specie_ct, rand);
 
 
@@ -263,6 +265,7 @@ pub fn main(init: std.process.Init) !void {
     var prev_mouse = V2 {0,0};
     while (r.RGFW_window_shouldClose(window) == 0) {
         _ = UI.frame.arena.reset(.retain_capacity);
+        UI.frame.mouse_on_ui = false;
         // TODO: limit frame rate
         const start = std.Io.Timestamp.now(io, .boot);
         defer {
@@ -306,7 +309,7 @@ pub fn main(init: std.process.Init) !void {
             if (r.RGFW_isKeyDown(r.RGFW_keyShiftL) == 1) {
                 particle_constant.specie_ct = specie_ct;
                 randomize_particle_specie(species[0..particle_constant.specie_ct], rand);
-                randomize_config(&particle_force_configs, particle_constant.specie_ct, rand);
+                randomize_config(&particle_force_configs, particle_constant.specie_ct, always_self_attract, rand);
                 try vulkan.upload_with_staging(force_configs_buf, staging_buf, staging_mapped, particle_force_configs[0..specie_ct*specie_ct]);
                 try vulkan.upload_with_staging(species_buf, staging_buf, staging_mapped, species[0..specie_ct]);
             }
@@ -337,8 +340,8 @@ pub fn main(init: std.process.Init) !void {
                 UI.frame.mouse / m.splat2(particle_constant.camera.zoom)
                 + m.apply_aspect_ratio(particle_constant.camera.pos, 1/vulkan.state.aspect_ratio);
 
-        if (is_mouse_down()) particle_constant.mouse_action = .push;
-        if (is_mouse_right_down()) particle_constant.mouse_action = .pull;
+        if (!UI.frame.mouse_on_ui and is_mouse_down()) particle_constant.mouse_action = .push
+        else if (!UI.frame.mouse_on_ui and is_mouse_right_down()) particle_constant.mouse_action = .pull;
 
         const compute_durations = blk: {
             try vulkan.compute_fence();
@@ -430,54 +433,62 @@ pub fn main(init: std.process.Init) !void {
                 layout.text("[Shift+R]          Randomize Configurations");
                 layout.text("[G]                Toggle GUI Overlay");
                 layout.text("[Mouse Left/Right] Push/Pull");
-                layout.spliter(spliter_w);
 
-                layout.text2(title_scale, title_color, "Live Settings"); _ = layout.row(0);
-                layout.slide_bar_with_title(f32, b_simulation_dt.min, b_simulation_dt.max, &particle_constant.dt, "Simulation Delta Time: {d:.4} s");
-                _ = layout.row(0);
+                {
+                    layout.spliter(spliter_w);
+                    layout.text2(title_scale, title_color, "Live Settings"); _ = layout.row(0);
+                    layout.slide_bar_with_title(f32, b_simulation_dt.min, b_simulation_dt.max, &particle_constant.dt, "Simulation Delta Time: {d:.4} s");
+                    _ = layout.row(0);
 
-                layout.slide_bar_with_title(f32, b_drag.min, b_drag.max, &particle_constant.drag, "Drag: {d:.4}");
-                _ = layout.row(0);
+                    layout.slide_bar_with_title(f32, b_drag.min, b_drag.max, &particle_constant.drag, "Drag: {d:.4}");
+                    _ = layout.row(0);
 
-                layout.slide_bar_with_title(f32,
-                    b_collision_strength.min, b_collision_strength.max,
-                    &particle_constant.collision_cfg.strength,
-                    "Collision Strength: {d:.4}");
-                _ = layout.row(0);
+                    layout.slide_bar_with_title(f32,
+                        b_collision_strength.min, b_collision_strength.max,
+                        &particle_constant.collision_cfg.strength,
+                        "Collision Strength: {d:.4}");
+                    _ = layout.row(0);
 
-                layout.slide_bar_with_title(f32,
-                    b_collision_radius.min, b_collision_radius.max,
-                    &particle_constant.collision_cfg.radius,
-                    "Collision Radius: {d:.5}");
-                _ = layout.row(0);
+                    layout.slide_bar_with_title(f32,
+                        b_collision_radius.min, b_collision_radius.max,
+                        &particle_constant.collision_cfg.radius,
+                        "Collision Radius: {d:.5}");
+                    _ = layout.row(0);
 
-                layout.slide_bar_with_title(f32,
-                    b_central_strength.min, b_central_strength.max,
-                    &particle_constant.central_force,
-                    "Central Force: {d:.4}");
-                _ = layout.row(0);
+                    layout.slide_bar_with_title(f32,
+                        b_central_strength.min, b_central_strength.max,
+                        &particle_constant.central_force,
+                        "Central Force: {d:.4}");
+                    _ = layout.row(0);
+                }
 
-                layout.spliter(spliter_w);
-                layout.text2(title_scale, title_color, "Particle Generation Settings [R]"); _ = layout.row(0);
-                layout.slide_bar_with_title(u32, 3000, particles.len, &particle_ct, "Particle Count: {}");
-                _ = layout.row(0);
+                {
+                    layout.spliter(spliter_w);
+                    layout.text2(title_scale, title_color, "Particle Generation Settings [R]"); _ = layout.row(0);
+                    layout.slide_bar_with_title(u32, 3000, particles.len, &particle_ct, "Particle Count: {}");
+                    _ = layout.row(0);
+                }
 
-                layout.spliter(spliter_w);
-                layout.text2(title_scale, title_color, "Configuration Generation Settings [Shift+R]"); _ = layout.row(0);
-                layout.text_fmt("Strength Range: {d:.4}  {d:.4}", .{b_force_strength.min, b_force_strength.max});
-                layout.double_slide_bar(f32,
-                    r_force_strength.min, r_force_strength.max,
-                    &b_force_strength.min, &b_force_strength.max);
-                _ = layout.row(0);
+                {
+                    layout.spliter(spliter_w);
+                    layout.text2(title_scale, title_color, "Configuration Generation Settings [Shift+R]"); _ = layout.row(0);
+                    layout.text_fmt("Strength Range: {d:.4}  {d:.4}", .{b_force_strength.min, b_force_strength.max});
+                    layout.double_slide_bar(f32,
+                        r_force_strength.min, r_force_strength.max,
+                        &b_force_strength.min, &b_force_strength.max);
+                    _ = layout.row(0);
 
-                layout.text_fmt("Radius   Range: {d:.4}  {d:.4}", .{b_force_radius.min, b_force_radius.max});
-                layout.double_slide_bar(f32,
-                    r_force_radius.min, r_force_radius.max,
-                    &b_force_radius.min, &b_force_radius.max);
-                _ = layout.row(0);
+                    layout.text_fmt("Radius   Range: {d:.4}  {d:.4}", .{b_force_radius.min, b_force_radius.max});
+                    layout.double_slide_bar(f32,
+                        r_force_radius.min, r_force_radius.max,
+                        &b_force_radius.min, &b_force_radius.max);
+                    _ = layout.row(0);
 
-                layout.slide_bar_with_title(u32, 1, MAX_PARTICLE_SPECIE, &specie_ct, "Specie Count: {}");
-                _ = layout.row(0);
+                    layout.slide_bar_with_title(u32, 1, MAX_PARTICLE_SPECIE, &specie_ct, "Specie Count: {}");
+                    _ = layout.row(0);
+
+                    layout.check_box(&always_self_attract, "Always Self Attract");
+                }
 
                 layout.spliter(spliter_w);
                 const rect_size = [2]f32 {0.05,0.05};
@@ -577,6 +588,8 @@ pub const Theme = struct {
     text_color : [4]f32,
     text_scale : f32,
     padding    : f32,
+    btn_hover_color_mul  : f32,
+    btn_pressed_color_mul: f32,
     slide_bar_w: f32,
     slide_bar_left_spacing: f32,
     slide_bar_right_spacing: f32,
@@ -590,6 +603,10 @@ pub const UI = struct {
         .text_color = .{0.8,0.8,0.8,1},
         .text_scale = 2,
         .padding = 0.02,
+
+        .btn_hover_color_mul = 3,
+        .btn_pressed_color_mul = 0.7,
+
         .slide_bar_w = 0.3,
         .slide_bar_left_spacing = 0.15,
         .slide_bar_right_spacing = 0.05,
@@ -598,6 +615,7 @@ pub const UI = struct {
         arena: std.heap.ArenaAllocator = undefined,
         mouse: [2]f32 = .{0,0},
         mouse_delta: [2]f32 = .{0,0},
+        mouse_on_ui: bool = false,
     } = .{};
 
     pub var persistents: std.hash_map.AutoHashMap(*anyopaque, UI) = undefined;
@@ -701,15 +719,16 @@ pub const Layout = struct {
         const btn_rect = Rect.from_center(.{pos[0]+i*slide_bar_w, pos[1]+slide_rect.size[1]/2}, slide_btn_size);
         var btn_color: V4 = UI.theme.text_color;
         if (btn_rect.point_in(UI.frame.mouse) or ui.pressed) {
+            UI.frame.mouse_on_ui = true;
             if (is_mouse_down()) {
                 ui.pressed = true;
-                btn_color *= V4 {0.1,0.1,0.1,1};
+                btn_color = m.color_mul(btn_color, UI.theme.btn_pressed_color_mul);
                 i = @max((UI.frame.mouse[0] - slide_rect.pos[0]) / slide_rect.size[0], 0);
                 val1.* = m.cast(T, i * m.cast(f32, right-left) + m.cast(f32, left));
                 val1.* = std.math.clamp(val1.*, clamp_left, clamp_right);
             } else {
                 ui.pressed = false;
-                btn_color *= m.splat4(1.2);
+                btn_color = m.color_mul(btn_color, UI.theme.btn_hover_color_mul);
             }
         }
         draw.rectangle(btn_rect, btn_color);
@@ -745,5 +764,32 @@ pub const Layout = struct {
         pos[0] += slide_bar_w + UI.theme.slide_bar_right_spacing;
 
         UI.text_fmt(pos, .left, "{d:.4}", .{right});
+    }
+
+    pub fn check_box(layout: *Layout, checked: *bool, str: []const u8) void {
+        const font_h = 0.05;
+        var pos = layout.row(font_h);
+        const size = m.splat2(font_h);
+        pos[0] += font_h/2.0;
+        const check_box_rec = Rect.from_center(pos, size);
+        const outline_check_box_rec = Rect.from_center(pos, size*m.splat2(0.75));
+        const inner_check_box_rec = Rect.from_center(pos, size*m.splat2(0.5));
+        var color = UI.theme.text_color;
+        const hover = check_box_rec.point_in(UI.frame.mouse);
+        if (hover) {
+            color = m.color_mul(color, UI.theme.btn_hover_color_mul);
+        }
+        if (!checked.*) {
+            color = m.color_mul(color, 0.1);
+        }
+        draw.rectangle(check_box_rec, m.color_mul(UI.theme.text_color, 0.8));
+        draw.rectangle(outline_check_box_rec, .{0,0,0,1});
+        draw.rectangle(inner_check_box_rec, color);
+        if (is_mouse_pressed() and hover) {
+            checked.* = !checked.*;
+        }
+
+        pos[0] += font_h/2.0 + UI.theme.padding;
+        UI.text_fmt(pos, .left, "{s}", .{str});
     }
 };
