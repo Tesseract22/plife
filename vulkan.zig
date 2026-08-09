@@ -164,7 +164,8 @@ pub fn init_instance(gpa: Allocator) !void {
     var create_info = v.InstanceCreateInfo {};
     create_info.p_application_info = &app_info;
     create_info.enabled_layer_count = 1;
-    const layers: []const [*:0]const u8 = &.{"VK_LAYER_KHRONOS_validation"};
+    const layers: []const [*:0]const u8 = if (@import("builtin").optimize == .debug) &.{"VK_LAYER_KHRONOS_validation"} else &.{};
+    std.log.info("enabled layers={}", .{layers.len});
     create_info.pp_enabled_layer_names = layers.ptr;
     create_info.enabled_layer_count = @intCast(layers.len);
     // var required_extension_count: u32 = undefined;

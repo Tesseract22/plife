@@ -262,6 +262,7 @@ pub fn main(init: std.process.Init) !void {
         .method = .grid, .aspect_ratio = vulkan.state.aspect_ratio, .dt = 1.0/120.0,
         .mouse_pos = .{0,0}, .mouse_action = .none, .central_force = 0,
     };
+    var lock_fps = true;
     var prev_mouse = V2 {0,0};
     while (r.RGFW_window_shouldClose(window) == 0) {
         _ = UI.frame.arena.reset(.retain_capacity);
@@ -272,12 +273,14 @@ pub fn main(init: std.process.Init) !void {
             const end = std.Io.Timestamp.now(io, .boot);
             dt = @as(f32, @floatFromInt(start.durationTo(end).nanoseconds)) / std.time.ns_per_s;
             real_dt = dt;
-            if (dt < target_dt) {
+            if (lock_fps and dt < target_dt) {
                 io.sleep(.{ .nanoseconds = @intFromFloat((target_dt - dt) * std.time.ns_per_s) }, .boot)
                     catch unreachable;
                 dt = target_dt;
             }
-
+        }
+        if (!lock_fps) {
+            particle_constant.dt = dt/2.0;
         }
 
         // FIXME: when window resized, we need to recreate swap chain
@@ -433,12 +436,22 @@ pub fn main(init: std.process.Init) !void {
                 layout.text("[Shift+R]          Randomize Configurations");
                 layout.text("[G]                Toggle GUI Overlay");
                 layout.text("[Mouse Left/Right] Push/Pull");
+                layout.text("[W/A/S/D]          Camera Movement");
+                layout.text("[Mouse Whell]      Camera Zoom");
 
                 {
                     layout.spliter(spliter_w);
                     layout.text2(title_scale, title_color, "Live Settings"); _ = layout.row(0);
-                    layout.slide_bar_with_title(f32, b_simulation_dt.min, b_simulation_dt.max, &particle_constant.dt, "Simulation Delta Time: {d:.4} s");
+
+                    if (layout.check_box(&lock_fps, "Lock FPS") and lock_fps) {
+                        particle_constant.dt = 1.0/120.0;
+                    }
                     _ = layout.row(0);
+
+                    if (lock_fps) {
+                        layout.slide_bar_with_title(f32, b_simulation_dt.min, b_simulation_dt.max, &particle_constant.dt, "Simulation Delta Time: {d:.4} s");
+                        _ = layout.row(0);
+                    }
 
                     layout.slide_bar_with_title(f32, b_drag.min, b_drag.max, &particle_constant.drag, "Drag: {d:.4}");
                     _ = layout.row(0);
@@ -487,7 +500,7 @@ pub fn main(init: std.process.Init) !void {
                     layout.slide_bar_with_title(u32, 1, MAX_PARTICLE_SPECIE, &specie_ct, "Specie Count: {}");
                     _ = layout.row(0);
 
-                    layout.check_box(&always_self_attract, "Always Self Attract");
+                    _ = layout.check_box(&always_self_attract, "Always Self Attract");
                 }
 
                 layout.spliter(spliter_w);
@@ -766,7 +779,7 @@ pub const Layout = struct {
         UI.text_fmt(pos, .left, "{d:.4}", .{right});
     }
 
-    pub fn check_box(layout: *Layout, checked: *bool, str: []const u8) void {
+    pub fn check_box(layout: *Layout, checked: *bool, str: []const u8) bool {
         const font_h = 0.05;
         var pos = layout.row(font_h);
         const size = m.splat2(font_h);
@@ -785,11 +798,14 @@ pub const Layout = struct {
         draw.rectangle(check_box_rec, m.color_mul(UI.theme.text_color, 0.8));
         draw.rectangle(outline_check_box_rec, .{0,0,0,1});
         draw.rectangle(inner_check_box_rec, color);
+        var changed = false;
         if (is_mouse_pressed() and hover) {
+            changed = true;
             checked.* = !checked.*;
         }
 
         pos[0] += font_h/2.0 + UI.theme.padding;
         UI.text_fmt(pos, .left, "{s}", .{str});
+        return changed;
     }
 };
