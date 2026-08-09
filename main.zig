@@ -91,6 +91,7 @@ var   b_force_strength     = r_force_strength;
 
 const b_collision_radius   = Bound.init(0.001, 0.029);
 const b_collision_strength = Bound.init(0.31, 0.8);
+const b_central_strength   = Bound.init(-1, 1);
 
 const b_drag               = Bound.init(0, 100);
 
@@ -138,6 +139,11 @@ pub const Particle_Constant = extern struct {
     method: Method,
     aspect_ratio: f32,
     dt: f32,
+
+    mouse_pos: [2]f32,
+    mouse_action: enum(u32) { none, push, pull, },
+
+    central_force: f32,
 };
 
 pub fn main(init: std.process.Init) !void {
@@ -247,11 +253,12 @@ pub fn main(init: std.process.Init) !void {
     UI.init(init.gpa);
     defer UI.deinit();
 
-    var display_gui = false;
+    var display_gui = true;
     var particle_constant = Particle_Constant {
         .camera = .{}, .specie_ct = specie_ct, .particle_ct = particle_ct,
-        .collision_cfg = .{.radius = 0.02,.strength = 0.4}, .drag = 20, .ping_pong = true,
+        .collision_cfg = .{.radius = 0.02,.strength = 0.5}, .drag = 20, .ping_pong = true,
         .method = .grid, .aspect_ratio = vulkan.state.aspect_ratio, .dt = 1.0/120.0,
+        .mouse_pos = .{0,0}, .mouse_action = .none, .central_force = 0,
     };
     var prev_mouse = V2 {0,0};
     while (r.RGFW_window_shouldClose(window) == 0) {
@@ -325,6 +332,14 @@ pub fn main(init: std.process.Init) !void {
         defer prev_mouse = UI.frame.mouse;
         UI.frame.mouse_delta = UI.frame.mouse-prev_mouse;
 
+        particle_constant.mouse_action = .none;
+        particle_constant.mouse_pos =
+                UI.frame.mouse / m.splat2(particle_constant.camera.zoom)
+                + m.apply_aspect_ratio(particle_constant.camera.pos, 1/vulkan.state.aspect_ratio);
+
+        if (is_mouse_down()) particle_constant.mouse_action = .push;
+        if (is_mouse_right_down()) particle_constant.mouse_action = .pull;
+
         const compute_durations = blk: {
             try vulkan.compute_fence();
             const compute_durations = try vulkan.begin_dispatch();
@@ -370,11 +385,12 @@ pub fn main(init: std.process.Init) !void {
             //     draw.rectangle(.{.pos = .{-1,-1+f*GRID_CELL_SIZE-thick/2.0}, .size = .{2,thick}}, .{1,1,1,1});
             //     draw.rectangle(.{.pos = .{-1+f*GRID_CELL_SIZE-thick/2.0,-1}, .size = .{thick,2}}, .{1,1,1,1});
             // }
-            const camera_mouse = particle_constant.camera.untranslate(UI.frame.mouse);
+
+            // camera_mouse[0] *= vulkan.state.aspect_ratio;
 
             try vulkan.copy_buffer(staging_buf, grid_offsets_buf, @sizeOf(u32) * GRID_CELL_COUNT);
             const offsets = std.mem.bytesAsSlice(u32, std.mem.sliceAsBytes(staging_mapped));
-            const num_in_bin: u32 = if (m.cell_from_pos(camera_mouse)) |cell| blk: {
+            const num_in_bin: u32 = if (m.cell_from_pos(particle_constant.mouse_pos)) |cell| blk: {
                 // log.info("camera mouse={}, cell={}", .{camera_mouse, cell});
                 const pos = m.splat2(GRID_CELL_SIZE)*@as(V2, @floatFromInt(cell)) + m.splat2(-1);
                 draw.rectangle(.{.pos = pos, .size = m.splat2(GRID_CELL_SIZE) }, .{1,0,0,0.2});
@@ -405,15 +421,19 @@ pub fn main(init: std.process.Init) !void {
 
                 var layout = Layout { .x = draw.topleft()[0] + 0.01, .y = draw.topleft()[1], .alignment = .left };
                 const spliter_w = 0.75;
+                const title_color = [4]f32 {2,2,2,1};
+                const title_scale = UI.theme.text_scale*1.1;
+
+                _ = layout.row(0);
+                layout.text2(title_scale, title_color, "Hot Keys"); _ = layout.row(0);
+                layout.text("[R]                Regenerate Particles");
+                layout.text("[Shift+R]          Randomize Configurations");
+                layout.text("[G]                Toggle GUI Overlay");
+                layout.text("[Mouse Left/Right] Push/Pull");
                 layout.spliter(spliter_w);
 
+                layout.text2(title_scale, title_color, "Live Settings"); _ = layout.row(0);
                 layout.slide_bar_with_title(f32, b_simulation_dt.min, b_simulation_dt.max, &particle_constant.dt, "Simulation Delta Time: {d:.4} s");
-                _ = layout.row(0);
-
-                layout.slide_bar_with_title(u32, 3000, particles.len, &particle_ct, "Particle Count: {}");
-                _ = layout.row(0);
-
-                layout.slide_bar_with_title(u32, 1, MAX_PARTICLE_SPECIE, &specie_ct, "Specie Count: {}");
                 _ = layout.row(0);
 
                 layout.slide_bar_with_title(f32, b_drag.min, b_drag.max, &particle_constant.drag, "Drag: {d:.4}");
@@ -431,8 +451,19 @@ pub fn main(init: std.process.Init) !void {
                     "Collision Radius: {d:.5}");
                 _ = layout.row(0);
 
+                layout.slide_bar_with_title(f32,
+                    b_central_strength.min, b_central_strength.max,
+                    &particle_constant.central_force,
+                    "Central Force: {d:.4}");
+                _ = layout.row(0);
+
                 layout.spliter(spliter_w);
-                layout.text("Interaction Force Randomizatin: (applied after regeneration)");
+                layout.text2(title_scale, title_color, "Particle Generation Settings [R]"); _ = layout.row(0);
+                layout.slide_bar_with_title(u32, 3000, particles.len, &particle_ct, "Particle Count: {}");
+                _ = layout.row(0);
+
+                layout.spliter(spliter_w);
+                layout.text2(title_scale, title_color, "Configuration Generation Settings [Shift+R]"); _ = layout.row(0);
                 layout.text_fmt("Strength Range: {d:.4}  {d:.4}", .{b_force_strength.min, b_force_strength.max});
                 layout.double_slide_bar(f32,
                     r_force_strength.min, r_force_strength.max,
@@ -443,6 +474,9 @@ pub fn main(init: std.process.Init) !void {
                 layout.double_slide_bar(f32,
                     r_force_radius.min, r_force_radius.max,
                     &b_force_radius.min, &b_force_radius.max);
+                _ = layout.row(0);
+
+                layout.slide_bar_with_title(u32, 1, MAX_PARTICLE_SPECIE, &specie_ct, "Specie Count: {}");
                 _ = layout.row(0);
 
                 layout.spliter(spliter_w);
@@ -534,11 +568,15 @@ pub fn is_mouse_down() bool {
     return r.RGFW_isMouseDown(r.RGFW_mouseLeft) != 0;
 }
 
+pub fn is_mouse_right_down() bool {
+    return r.RGFW_isMouseDown(r.RGFW_mouseRight) != 0;
+}
+
 pub const Theme = struct {
-    line_thick: f32,
+    line_thick : f32,
     text_color : [4]f32,
     text_scale : f32,
-    padding: f32,
+    padding    : f32,
     slide_bar_w: f32,
     slide_bar_left_spacing: f32,
     slide_bar_right_spacing: f32,
@@ -583,16 +621,8 @@ pub const UI = struct {
     }
 
     pub fn text_fmt(pos: [2]f32, alignment: Alignment, comptime fmt: []const u8, args: anytype) void {
-        text(pos, alignment, alloc_print(fmt, args));
-    }
-
-    pub fn text(pos: [2]f32, alignment: Alignment, str: []const u8) void {
-        var aligned_pos = pos;
-        switch (alignment) {
-            .left => {},
-            .right => aligned_pos[0] -= draw.measure_text(str, UI.theme.text_scale)[0],
-        }
-        draw.text(aligned_pos, str, UI.theme.text_scale, UI.theme.text_color);
+        var layout = Layout { .x=pos[0],.y=pos[1], .alignment = alignment };
+        layout.text_fmt(fmt, args);
     }
 };
 
@@ -610,18 +640,28 @@ pub const Layout = struct {
     pub fn spliter(layout: *Layout, w: f32) void {
         const spliter_pos = layout.row(UI.theme.line_thick);
         draw.rectangle(.{.pos=spliter_pos, .size = .{w,UI.theme.line_thick}}, UI.theme.text_color);
+        _ = layout.row(UI.theme.line_thick);
     }
 
     pub fn text_fmt(layout: *Layout, comptime fmt: []const u8, args: anytype) void {
-        layout.text(std.fmt.allocPrint(UI.frame.arena.allocator(), fmt, args) catch @panic("OOM"));
+        const str = if (args.len == 0) fmt else UI.alloc_print(fmt, args);
+        layout.text(str);
     }
 
     pub fn text(layout: *Layout, str: []const u8) void {
-        const scale = UI.theme.text_scale;
+        layout.text2(UI.theme.text_scale, UI.theme.text_color, str);
+    }
+
+    pub fn text2(layout: *Layout, scale: f32, color: [4]f32, str: []const u8) void {
         const size = draw.measure_text(str, scale);
         const pos = layout.row(size[1]);
 
-        UI.text(pos, layout.alignment, str);
+        var aligned_pos = pos;
+        switch (layout.alignment) {
+            .left => {},
+            .right => aligned_pos[0] -= draw.measure_text(str, UI.theme.text_scale)[0],
+        }
+        draw.text(aligned_pos, str, scale, color);
     }
 
     pub fn slide_bar_with_title(layout: *Layout, comptime T: type, left: T, right: T, val: *T, comptime fmt: []const u8) void {
@@ -699,8 +739,8 @@ pub const Layout = struct {
         const slide_rect = Rect {.pos=pos, .size=.{slide_bar_w, font_h}};
         draw.rectangle(slide_rect, .{0.3,0.3,0.3,1});
 
-        slide_bar_btn(T, ui1, slide_rect, left, right, left, val2.* * 0.9, val1); 
-        slide_bar_btn(T, ui2, slide_rect, left, right, val1.* * 1.1, right, val2); 
+        slide_bar_btn(T, ui1, slide_rect, left, right, left, val2.* * 0.9, val1);
+        slide_bar_btn(T, ui2, slide_rect, left, right, val1.* * 1.1, right, val2);
 
         pos[0] += slide_bar_w + UI.theme.slide_bar_right_spacing;
 

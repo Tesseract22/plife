@@ -292,7 +292,7 @@ pub const Compute = struct {
         inline for (0..3) |x| {
             inline for (0..3) |y| {
                 const neighbor_i = @Vector(2, f32) {cell_i[0]+x-1, cell_i[1]+y-1};
-                if (neighbor_i[0] >= driver.GRID_CELL_SIDE_COUNT or neighbor_i[0] < 0) {} 
+                if (neighbor_i[0] >= driver.GRID_CELL_SIDE_COUNT or neighbor_i[0] < 0) {}
                 else if (neighbor_i[1] >= driver.GRID_CELL_SIDE_COUNT or neighbor_i[1] < 0) {}
                 else {
                     const bin = m.bin_from_cell(.{ @intFromFloat(neighbor_i[0]), @intFromFloat(neighbor_i[1]) });
@@ -300,8 +300,29 @@ pub const Compute = struct {
                 }
             }
         }
-        pos = pos + m.splat2(dt) * spd;
+        const MOUSE_RADIUS = 0.1;
+        const MOUSE_STRENGTH = 30;
+        switch (constant.mouse_action) {
+            .none => {},
+            .pull, .push => {
+                const sign: f32 = if (constant.mouse_action == .push) -1 else 1;
+                const l = @as(V2, constant.mouse_pos) - pos;
+                const d = m.len(l);
+                const unit_l = l / m.splat2(d);
+                if (d <= MOUSE_RADIUS) {
+                    spd = @as(V2, spd) + unit_l * m.splat2(MOUSE_STRENGTH * dt * sign);
+                }
+            },
+        }
+        {
+            const len_to_center = m.len2(pos);
+            const unit_l = pos / m.splat2(len_to_center);
+            const central_force = linear_force(.{ .radius = 2, .strength = constant.central_force }, len_to_center);
+            spd = spd + unit_l * m.splat2(central_force * dt);
+        }
+
         spd = spd * m.splat2(@exp(-constant.drag*dt*m.len(spd)));
+        pos = pos + m.splat2(dt) * spd;
         switch (boundary_mode) {
             .clamp => {
                 if (pos[1] < -1) {

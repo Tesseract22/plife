@@ -84,6 +84,10 @@ pub inline fn apply_aspect_ratio(pos: [2]f32, ratio: f32) [2]f32 {
     return .{ pos[0]/ratio, pos[1] };
 }
 
+pub inline fn color_mul(c: V4, mul: f32) V4 {
+    return .{c[0]*mul, c[1]*mul, c[2]*mul, c[3]};
+}
+
 const V2 = @Vector(2, f32);
 const V3 = @Vector(3, f32);
 const V4 = @Vector(4, f32);
