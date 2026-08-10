@@ -6,7 +6,7 @@ pub const GRID_CELL_COUNT      = GRID_CELL_SIDE_COUNT * GRID_CELL_SIDE_COUNT;
 pub const GRID_CELL_SIZE       = 2.0/@as(comptime_float, GRID_CELL_SIDE_COUNT);
 
 pub const Particle = extern struct {
-    pos: [2]f32,
+    pos: [2]f32 align(16),
     spd: [2]f32,
     specie: u32,
 };
@@ -136,7 +136,6 @@ pub const Particle_Constant = extern struct {
     specie_ct: u32,
     particle_ct: u32,
     collision_cfg: Force_Config,
-    method: Method,
     aspect_ratio: f32,
     dt: f32,
 
@@ -144,6 +143,28 @@ pub const Particle_Constant = extern struct {
     mouse_action: enum(u32) { none, push, pull, },
 
     central_force: f32,
+};
+
+pub const Annoucement = struct {
+    const default_color = m.color_mul(UI.theme.text_color, UI.theme.btn_hover_color_mul);
+    t: f32,
+    color: [4]f32 = default_color,
+    text: []const u8,
+    arena: std.heap.ArenaAllocator,
+
+    pub fn update(self: *Annoucement, dt: f32) void {
+        if (self.t <= 0) {
+            self.color[3] = exp_smooth(self.color[3], 0, dt);
+        }
+        self.t -= dt;
+    }
+
+    pub fn reset(self: *Annoucement, t: f32, comptime fmt: []const u8, args: anytype) void {
+        _ = self.arena.reset(.retain_capacity); 
+        self.t = t;
+        self.text = std.fmt.allocPrint(self.arena.allocator(), fmt, args) catch @panic("OOM");
+        self.color = default_color;
+    }
 };
 
 pub fn main(init: std.process.Init) !void {
@@ -154,17 +175,20 @@ pub fn main(init: std.process.Init) !void {
 
     var   particles  : [80000]Particle = undefined;
     var   particle_ct: u32 = particles.len/2;
-    var   species    : [MAX_PARTICLE_SPECIE]Particle_Specie = undefined;
-    var   specie_ct  : u32 = 4;
-    var   particle_force_configs : [MAX_PARTICLE_SPECIE*MAX_PARTICLE_SPECIE]Force_Config = undefined;
     var   always_self_attract = true;
+    var   config = Configuration {
+        .specie_ct = 4,
+        .particle_force_configs = undefined,
+        .collision_force_config = undefined, // duplicated
+        .species                = undefined,
+    };
 
     const particles_size = @sizeOf(Particle) * particles.len;
     const configs_size = MAX_PARTICLE_SPECIE*MAX_PARTICLE_SPECIE * @sizeOf(Force_Config);
     const species_size = MAX_PARTICLE_SPECIE * @sizeOf(Particle_Specie);
-    randomize_particle_specie(species[0..specie_ct], rand);
-    randomize_config(particle_force_configs[0..specie_ct*specie_ct], specie_ct, always_self_attract, rand);
-    generate_particle(&particles, specie_ct, rand);
+    randomize_particle_specie(config.species[0..config.specie_ct], rand);
+    randomize_config(config.particle_force_configs[0..config.specie_ct*config.specie_ct], config.specie_ct, always_self_attract, rand);
+    generate_particle(&particles, config.specie_ct, rand);
 
 
     const WINDOW_W = 1900;
@@ -173,8 +197,9 @@ pub fn main(init: std.process.Init) !void {
     const APP_NAME = "Vulkan 1.0 Example";
     _ = r.RGFW_init(APP_NAME, 0);
     const window = r.RGFW_createWindow(APP_NAME, 0, 0,
-        WINDOW_W, WINDOW_H, r.RGFW_windowCenter)
+        WINDOW_W, WINDOW_H, r.RGFW_windowCenter | r.RGFW_windowAllowDND)
         orelse @panic("cannot create window");
+    r.RGFW_setBuildDND(1);
 
     //
     // Create Instance
@@ -226,8 +251,8 @@ pub fn main(init: std.process.Init) !void {
         try vulkan.copy_buffer(part_buf1, staging_buf, size);
         try vulkan.copy_buffer(part_buf2, staging_buf, size);
     }
-    try vulkan.upload_with_staging(force_configs_buf, staging_buf, staging_mapped, particle_force_configs[0..specie_ct*specie_ct]);
-    try vulkan.upload_with_staging(species_buf, staging_buf, staging_mapped, species[0..specie_ct]);
+    try vulkan.upload_with_staging(force_configs_buf, staging_buf, staging_mapped, config.particle_force_configs[0..config.specie_ct*config.specie_ct]);
+    try vulkan.upload_with_staging(species_buf, staging_buf, staging_mapped, config.species[0..config.specie_ct]);
 
     try vulkan.init_particle_desc_set(
         .{part_buf1.buf, part_buf2.buf},
@@ -257,11 +282,18 @@ pub fn main(init: std.process.Init) !void {
 
     var display_gui = true;
     var particle_constant = Particle_Constant {
-        .camera = .{}, .specie_ct = specie_ct, .particle_ct = particle_ct,
+        .camera = .{}, .specie_ct = config.specie_ct, .particle_ct = particle_ct,
         .collision_cfg = .{.radius = 0.02,.strength = 0.5}, .drag = 20, .ping_pong = true,
-        .method = .grid, .aspect_ratio = vulkan.state.aspect_ratio, .dt = 1.0/120.0,
+        .aspect_ratio = vulkan.state.aspect_ratio, .dt = 1.0/120.0,
         .mouse_pos = .{0,0}, .mouse_action = .none, .central_force = 0,
     };
+    var annoucement = Annoucement {
+        .arena = .init(init.gpa),
+        .t = 0,
+        .text = "",
+    };
+    defer annoucement.arena.deinit();
+    var config_fresh = false; // keep track of if the config is newly loaded from a file
     var lock_fps = true;
     var prev_mouse = V2 {0,0};
     while (r.RGFW_window_shouldClose(window) == 0) {
@@ -301,20 +333,38 @@ pub fn main(init: std.process.Init) !void {
         if (r.RGFW_isKeyPressed(r.RGFW_keyG) == 1) {
             display_gui = !display_gui;
         }
-        if (r.RGFW_isKeyPressed(r.RGFW_keyM) == 1) {
-            particle_constant.method = @enumFromInt((@intFromEnum(particle_constant.method) + 1) % 3);
+        if (r.RGFW_isKeyPressed(r.RGFW_keyE) == 1) {
+            const path = "config.txt";
+            config.collision_force_config = particle_constant.collision_cfg;
+            try config.serialize(init.io, path);
+            annoucement.reset(5, "Configuration saved to {s}", .{path});
+        }
+        if (r.RGFW_window_getDataDrop(window)) |data_drop_ptr| {
+            const data_drop = data_drop_ptr[0];
+            log.info("data_drop: len={}, type={}", .{data_drop.length, data_drop.type});
+            const path = data_drop.data[0..data_drop.length-1]; // that last byte seems to be garbage for whatever reason
+            log.info("path: {s}", .{path});
+            const basename = std.fs.path.basename(path);
+            if (Configuration.deserialize(init.io, path)) |new_config| {
+                config = new_config;
+                config_fresh = true;
+                annoucement.reset(5, "New Configuration {s} Loaded!", .{basename});
+            } else |e| {
+                annoucement.reset(5, "cannot load config file: {}", .{e});
+            }
         }
 
-        // Update live
-
-        // Update on `R` or `shift+R`
         if (r.RGFW_isKeyPressed(r.RGFW_keyR) == 1) {
             if (r.RGFW_isKeyDown(r.RGFW_keyShiftL) == 1) {
-                particle_constant.specie_ct = specie_ct;
-                randomize_particle_specie(species[0..particle_constant.specie_ct], rand);
-                randomize_config(&particle_force_configs, particle_constant.specie_ct, always_self_attract, rand);
-                try vulkan.upload_with_staging(force_configs_buf, staging_buf, staging_mapped, particle_force_configs[0..specie_ct*specie_ct]);
-                try vulkan.upload_with_staging(species_buf, staging_buf, staging_mapped, species[0..specie_ct]);
+                particle_constant.specie_ct = config.specie_ct;
+                randomize_particle_specie(config.species[0..particle_constant.specie_ct], rand);
+                randomize_config(&config.particle_force_configs, particle_constant.specie_ct, always_self_attract, rand);
+                config_fresh = true;
+            }
+            if (config_fresh) {
+                try vulkan.upload_with_staging(force_configs_buf, staging_buf, staging_mapped, config.particle_force_configs[0..config.specie_ct*config.specie_ct]);
+                try vulkan.upload_with_staging(species_buf, staging_buf, staging_mapped, config.species[0..config.specie_ct]);
+                config_fresh = false;
             }
             particle_constant.particle_ct = particle_ct;
             generate_particle(&particles, particle_constant.specie_ct, rand);
@@ -404,6 +454,11 @@ pub fn main(init: std.process.Init) !void {
                 break :blk offsets[bin];
             } else 0;
             vulkan.end_camera();
+            {
+                var layout = Layout { .x = 0, .y = -1+UI.theme.padding, .alignment = .center };
+                layout.text2(UI.theme.text_scale, annoucement.color, annoucement.text);
+                annoucement.update(dt);
+            }
             // Right Panel
             {
                 var layout = Layout { .x = draw.botright()[0] - 0.01, .y = draw.topleft()[1] + UI.theme.padding, .alignment = .right };
@@ -497,7 +552,7 @@ pub fn main(init: std.process.Init) !void {
                         &b_force_radius.min, &b_force_radius.max);
                     _ = layout.row(0);
 
-                    layout.slide_bar_with_title(u32, 1, MAX_PARTICLE_SPECIE, &specie_ct, "Specie Count: {}");
+                    layout.slide_bar_with_title(u32, 1, MAX_PARTICLE_SPECIE, &config.specie_ct, "Specie Count: {}");
                     _ = layout.row(0);
 
                     _ = layout.check_box(&always_self_attract, "Always Self Attract");
@@ -513,7 +568,7 @@ pub fn main(init: std.process.Init) !void {
                 }
                 pos = layout.row(rect_size[1]);
                 for (0..particle_constant.specie_ct) |i| {
-                    const rgb = species[i].color;
+                    const rgb = config.species[i].color;
                     draw.rectangle(.{.pos=pos, .size=rect_size}, .{rgb[0],rgb[1],rgb[2],1});
                     pos[0] += UI.theme.padding + rect_size[0];
                 }
@@ -534,6 +589,7 @@ const vulkan = @import("vulkan.zig");
 const r = @import("RGFW");
 const m = @import("math.zig");
 const font = @import("font.zig");
+const Configuration = @import("configuration.zig");
 
 const std = @import("std");
 const log = std.log;
@@ -610,7 +666,7 @@ pub const Theme = struct {
 
 pub const UI = struct {
     pressed: bool = false,
-    pub const Alignment = enum { left, right };
+    pub const Alignment = enum { left, center, right };
     pub const theme = Theme {
         .line_thick = 0.01,
         .text_color = .{0.8,0.8,0.8,1},
@@ -690,6 +746,7 @@ pub const Layout = struct {
         var aligned_pos = pos;
         switch (layout.alignment) {
             .left => {},
+            .center => aligned_pos[0] -= draw.measure_text(str, UI.theme.text_scale)[0]/2,
             .right => aligned_pos[0] -= draw.measure_text(str, UI.theme.text_scale)[0],
         }
         draw.text(aligned_pos, str, scale, color);
