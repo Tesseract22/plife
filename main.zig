@@ -191,10 +191,11 @@ pub fn main(init: std.process.Init) !void {
     generate_particle(&particles, config.specie_ct, rand);
 
 
+    // TODO: handle window resize
     const WINDOW_W = 1900;
     const WINDOW_H = 1000;
     // const ASPECT_RATION = WINDOW_W/WINDOW_H;
-    const APP_NAME = "Vulkan 1.0 Example";
+    const APP_NAME = "Particle Life";
     _ = r.RGFW_init(APP_NAME, 0);
     const window = r.RGFW_createWindow(APP_NAME, 0, 0,
         WINDOW_W, WINDOW_H, r.RGFW_windowCenter | r.RGFW_windowAllowDND)
@@ -334,10 +335,19 @@ pub fn main(init: std.process.Init) !void {
             display_gui = !display_gui;
         }
         if (r.RGFW_isKeyPressed(r.RGFW_keyE) == 1) {
-            const path = "config.txt";
             config.collision_force_config = particle_constant.collision_cfg;
-            try config.serialize(init.io, path);
-            annoucement.reset(5, "Configuration saved to {s}", .{path});
+            var allocating = std.Io.Writer.Allocating.init(UI.frame.arena.allocator());
+            try config.print(&allocating.writer);
+            const transfer = r.RGFW_dataTransfer {
+                .data = allocating.written().ptr,
+                .length = allocating.written().len,
+                .type = r.RGFW_dataText,
+            };
+            if (r.RGFW_writeClipboard(&transfer) == 1) {
+                annoucement.reset(5, "Configuration saved to clipboard", .{});
+            } else {
+                annoucement.reset(5, "Cannot saved configuration", .{});
+            }
         }
         if (r.RGFW_window_getDataDrop(window)) |data_drop_ptr| {
             const data_drop = data_drop_ptr[0];
