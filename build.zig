@@ -29,13 +29,13 @@ pub fn build(b: *std.Build) void {
     mod.addLibraryPath(vulkan_lib);
     mod.addSystemIncludePath(vulkan_include);
 
-    const rgfw_c =  b.addTranslateC(.{
+    const translate_c =  b.addTranslateC(.{
         .target = target,
         .optimize = optimize,
         .root_source_file = b.path("c.h"),
     });
-    rgfw_c.addIncludePath(vulkan_include);
-    mod.addImport("RGFW", rgfw_c.createModule());
+    translate_c.addIncludePath(vulkan_include);
+    mod.addImport("c", translate_c.createModule());
 
     mod.addCSourceFile(.{
         .file = b.path("c.h"),

@@ -9,6 +9,8 @@ instance_handle   : v.Instance = .null_handle,
 instance_wrapper  : v.InstanceWrapper = undefined,
 instance          : Instance = undefined,
 
+window            : *r.RGFW_window = undefined,
+
 surface           : v.SurfaceKHR = .null_handle,
 surface_details   : v.SurfaceCapabilitiesKHR = undefined,
 physical_device   : v.PhysicalDevice = .null_handle,
@@ -20,6 +22,7 @@ present_family    : u32 = undefined,
 format            : v.SurfaceFormatKHR = undefined,
 present_mode      : v.PresentModeKHR = undefined,
 
+window_size       : [2]u32 = undefined,
 extent            : v.Extent2D = undefined,
 viewport          : v.Viewport = undefined,
 scissor           : v.Rect2D = undefined,
@@ -221,7 +224,30 @@ pub fn is_device_good(device: v.PhysicalDevice) bool {
     return vulkan11_features.variable_pointers == .true;
 }
 
-pub fn init_device(window_width: u32, window_height: u32) !Device {
+pub fn init_extent() !void {
+    state.surface_details = try state.instance.getPhysicalDeviceSurfaceCapabilitiesKHR(state.physical_device, state.surface);
+    var w: i32 = 0;
+    var h: i32 = 0;
+    _ = r.RGFW_window_getSize(state.window, &w, &h);
+    while (w == 0 or h == 0) {
+        _ = r.RGFW_window_getSize(state.window, &w, &h);
+        r.RGFW_pollEvents();
+    }
+    state.window_size = .{@intCast(w), @intCast(h)};
+    state.extent =
+        if (state.surface_details.current_extent.width != std.math.maxInt(u32))
+            state.surface_details.current_extent
+        else
+            v.Extent2D {
+                .width = std.math.clamp(state.window_size[0], state.surface_details.min_image_extent.width, state.surface_details.max_image_extent.width),
+                .height = std.math.clamp(state.window_size[1], state.surface_details.min_image_extent.height, state.surface_details.max_image_extent.height),
+            };
+    state.aspect_ratio = @as(f32, @floatFromInt(state.extent.width)) / @as(f32, @floatFromInt(state.extent.height));
+    log.info("window width={}, height={}, aspect_ratio={}", .{ state.extent.width, state.extent.height, state.aspect_ratio });
+}
+
+pub fn init_device(win: *r.RGFW_window) !Device {
+    state.window = win;
     const arena = state.arena.allocator();
     var device_count: u32 = 0;
     _ = try state.instance.enumeratePhysicalDevices(&device_count, null);
@@ -283,7 +309,7 @@ pub fn init_device(window_width: u32, window_height: u32) !Device {
         .enabled_extension_count = extensions.len,
     };
 
-    state.surface_details = try state.instance.getPhysicalDeviceSurfaceCapabilitiesKHR(state.physical_device, state.surface);
+    try init_extent();
     var format_count: u32 = 0;
     _ = try state.instance.getPhysicalDeviceSurfaceFormatsKHR(state.physical_device, state.surface, &format_count, null);
     if (format_count == 0) @panic("no format found");
@@ -300,21 +326,11 @@ pub fn init_device(window_width: u32, window_height: u32) !Device {
 
     state.format = for (formats) |format| {
         // FIXME: hacky way to do HDR
-        if (format.format == .r8g8b8a8_srgb and format.color_space == .srgb_nonlinear_khr) break format;
+    if (format.format == .r8g8b8a8_srgb and format.color_space == .srgb_nonlinear_khr) break format;
     } else formats[0];
     state.present_mode = for (present_modes) |present_mode| {
         if (present_mode == .mailbox_khr) break present_mode;
     } else .fifo_khr;
-    state.extent =
-        if (state.surface_details.current_extent.width != std.math.maxInt(u32))
-            state.surface_details.current_extent
-        else
-            v.Extent2D {
-                .width = std.math.clamp(window_width, state.surface_details.min_image_extent.width, state.surface_details.max_image_extent.width),
-                .height = std.math.clamp(window_height, state.surface_details.min_image_extent.height, state.surface_details.max_image_extent.height),
-            };
-    state.aspect_ratio = @as(f32, @floatFromInt(state.extent.width)) / @as(f32, @floatFromInt(state.extent.height));
-    log.info("window width={}, height={}, aspect_ratio={}", .{ state.extent.width, state.extent.height, state.aspect_ratio });
 
     state.device_handle = try state.instance.createDevice(state.physical_device, &device_create_info, null);
     state.device_wrapper = v.DeviceWrapper.load(state.device_handle, state.instance.wrapper.dispatch.vkGetDeviceProcAddr.?);
@@ -358,7 +374,8 @@ pub fn init_queues(device: Device) void {
     state.compute_queue  = device.getDeviceQueue(state.graphics_compute_family, 0);
 }
 
-pub fn init_swapchain(device: Device) !void {
+pub fn init_swapchain() !void {
+    const device = state.device;
     const image_count = state.surface_details.min_image_count;
     assert(state.surface_details.max_image_count != 0 and image_count <= state.surface_details.max_image_count);
 
@@ -387,6 +404,27 @@ pub fn init_swapchain(device: Device) !void {
     }
 
     state.swapchain = try device.createSwapchainKHR(&create_info, null);
+}
+
+pub fn reinit_swapchain() !void {
+    try state.device.deviceWaitIdle();
+    cleanup_swapchain();
+
+    try init_extent();
+    try init_swapchain();
+    try init_image_views();
+    try init_frame_buffers();
+    try init_hdr_texture();
+    try init_hdr_frame_buffers();
+}
+
+pub fn cleanup_swapchain() void {
+    const device = state.device;
+    for (state.frame_buffers) |frame_buffer|
+        device.destroyFramebuffer(frame_buffer, null);
+    for (state.image_views) |image_view|
+        device.destroyImageView(image_view, null);
+    device.destroySwapchainKHR(state.swapchain, null);
 }
 
 pub fn create_texture(format: v.Format, w: u32, h: u32, usage: v.ImageUsageFlags, layout: v.ImageLayout, swizzle: ?v.ComponentMapping) !Texture {
@@ -436,7 +474,8 @@ pub fn create_texture(format: v.Format, w: u32, h: u32, usage: v.ImageUsageFlags
     };
 }
 
-pub fn init_image_views(device: Device) !void {
+pub fn init_image_views() !void {
+    const device = state.device;
     const arena = state.arena.allocator();
     var image_count: u32 = 0;
     _ = try device.getSwapchainImagesKHR(state.swapchain, &image_count, null);
@@ -466,6 +505,10 @@ pub fn init_image_views(device: Device) !void {
         };
         state.image_views[i] = try device.createImageView(&create_info, null);
     }
+}
+
+pub fn init_hdr_texture() !void {
+    const device = state.device;
     state.hdr_texture = try create_texture(
         HDR_FORMAT,
         state.extent.width, state.extent.height,
@@ -474,20 +517,20 @@ pub fn init_image_views(device: Device) !void {
     state.physical_device_props = state.instance.getPhysicalDeviceProperties(state.physical_device);
     state.hdr_sampler = try device.createSampler(&.{
         .mag_filter = .linear,
-        .min_filter = .linear,
-        .address_mode_u = .clamp_to_edge,
-        .address_mode_v = .clamp_to_edge,
-        .address_mode_w = .clamp_to_edge,
-        .anisotropy_enable = .true,
-        .max_anisotropy = state.physical_device_props.limits.max_sampler_anisotropy,
-        .border_color = .int_opaque_black,
-        .unnormalized_coordinates = .false,
-        .compare_enable = .false,
-        .compare_op = .always,
-        .mipmap_mode = .linear,
-        .mip_lod_bias = 0,
-        .min_lod = 0,
-        .max_lod = 0,
+            .min_filter = .linear,
+            .address_mode_u = .clamp_to_edge,
+            .address_mode_v = .clamp_to_edge,
+            .address_mode_w = .clamp_to_edge,
+            .anisotropy_enable = .true,
+            .max_anisotropy = state.physical_device_props.limits.max_sampler_anisotropy,
+            .border_color = .int_opaque_black,
+            .unnormalized_coordinates = .false,
+            .compare_enable = .false,
+            .compare_op = .always,
+            .mipmap_mode = .linear,
+            .mip_lod_bias = 0,
+            .min_lod = 0,
+            .max_lod = 0,
     }, null);
 }
 
@@ -524,19 +567,14 @@ pub fn cleanup() void {
     for (state.compute_pipelines) |pipeline|
         device.destroyPipeline(pipeline, null);
 
-    for (state.frame_buffers) |frame_buffer|
-        device.destroyFramebuffer(frame_buffer, null);
-
     device.destroyShaderModule(state.shader, null);
-    for (state.image_views) |image_view|
-        device.destroyImageView(image_view, null);
+    cleanup_swapchain();
     device.destroyImage(state.hdr_image, null);
     device.destroyImageView(state.hdr_image_view, null);
     device.freeMemory(state.hdr_image_mem, null);
     device.destroyFramebuffer(state.hdr_frame_buffer, null);
     device.destroySampler(state.hdr_sampler, null);
 
-    device.destroySwapchainKHR(state.swapchain, null);
 
     device.destroyQueryPool(state.query_pool, null);
     device.destroyDevice(null);
@@ -549,7 +587,7 @@ pub fn cleanup() void {
 
 
 const v = @import("thirdparty/vk.zig");
-const r = @import("RGFW");
+const r = @import("c");
 const m = @import("math.zig");
 const Font = @import("font.zig");
 
@@ -634,14 +672,7 @@ pub fn init_hdr_render_pass() !void {
         .format = HDR_FORMAT,
         .off_screen = true,
     });
-    state.hdr_frame_buffer = try state.device.createFramebuffer(&.{
-        .render_pass = state.off_screen_render_pass,
-        .attachment_count = 1,
-        .p_attachments = @ptrCast(&state.hdr_texture.view),
-        .width = state.extent.width,
-        .height = state.extent.height,
-        .layers = 1,
-    }, null);
+    try init_hdr_frame_buffers();
 }
 
 pub fn init_render_pass() !void {
@@ -651,7 +682,9 @@ pub fn init_render_pass() !void {
     });
 }
 
-pub fn init_frame_buffers(arena: std.mem.Allocator, device: Device) !void {
+pub fn init_frame_buffers() !void {
+    const device = state.device;
+    const arena = state.arena.allocator();
     state.frame_buffers = try arena.alloc(v.Framebuffer, state.image_views.len);
     for (state.image_views, state.frame_buffers) |image_view, *frame_buffer| {
         const attachments: []const v.ImageView = &.{image_view};
@@ -664,6 +697,18 @@ pub fn init_frame_buffers(arena: std.mem.Allocator, device: Device) !void {
             .layers = 1,
         }, null);
     }
+}
+
+pub fn init_hdr_frame_buffers() !void  {
+    state.hdr_frame_buffer = try state.device.createFramebuffer(&.{
+        .render_pass = state.off_screen_render_pass,
+        .attachment_count = 1,
+        .p_attachments = @ptrCast(&state.hdr_texture.view),
+        .width = state.extent.width,
+        .height = state.extent.height,
+        .layers = 1,
+    }, null);
+
 }
 
 pub fn write_texture_to_descriptor(idx: u32, texture: v.ImageView) void {
@@ -1013,7 +1058,7 @@ fn create_pipeline(opts: Pipeline_Options) !v.Pipeline {
 
     const color_blend_attachment_info = switch (opts.blend_mode) {
         .normal => v.PipelineColorBlendAttachmentState {
-            .blend_enable = .true, // TODO: ????
+            .blend_enable = .true, // Configurable blend mode
             .src_color_blend_factor = .src_alpha,
             .dst_color_blend_factor = .one_minus_src_alpha,
             .color_blend_op = .@"add",
@@ -1305,7 +1350,22 @@ pub fn begin_draw() !void {
     const curr_frame = state.per_frame.curr_frame;
     const cmd = state.graphics_command_buffers[curr_frame];
 
-    state.per_frame.present_image_idx = try acquire_image(curr_frame);
+    _ = try device.waitForFences(&.{state.in_flight_fences[curr_frame]}, .true, std.math.maxInt(u64));
+
+    const next_image =
+        device.acquireNextImageKHR(
+            state.swapchain,
+            std.math.maxInt(u64),
+            state.image_available_semas[curr_frame], .null_handle)
+    catch |e| switch (e) {
+        error.OutOfDateKHR => {
+            try reinit_swapchain();
+            return;
+        },
+        else => return e,
+    };
+    state.per_frame.present_image_idx = next_image.image_index;
+    try device.resetFences(&.{state.in_flight_fences[curr_frame]});
     state.per_frame.cmd = cmd;
 
     try device.resetCommandBuffer(cmd, .{});
@@ -1405,15 +1465,6 @@ pub fn draw_particles_to_off_screen(
     device.cmdEndRenderPass(cmd);
 }
 
-pub fn acquire_image(curr_frame: u32) !u32 {
-    const device = state.device;
-    _ = try device.waitForFences(&.{state.in_flight_fences[curr_frame]}, .true, std.math.maxInt(u64));
-    try device.resetFences(&.{state.in_flight_fences[curr_frame]});
-
-    const next_result = try device.acquireNextImageKHR(state.swapchain, std.math.maxInt(u64), state.image_available_semas[curr_frame], .null_handle);
-    return next_result.image_index;
-}
-
 pub fn submit_graphics_cmd(curr_command_buffer: v.CommandBuffer, curr_frame: u32, image_idx: u32) !void {
     const device = state.device;
     const wait_semas: []const v.Semaphore = &.{
@@ -1433,12 +1484,16 @@ pub fn submit_graphics_cmd(curr_command_buffer: v.CommandBuffer, curr_frame: u32
         .p_signal_semaphores = signal_semas.ptr,
     }}, state.in_flight_fences[curr_frame]);
 
-    _ = try device.queuePresentKHR(state.present_queue, &.{
+    _ = device.queuePresentKHR(state.present_queue, &.{
         .wait_semaphore_count = @intCast(signal_semas.len),
         .p_wait_semaphores = signal_semas.ptr,
         .swapchain_count = 1, .p_swapchains = @ptrCast(&state.swapchain),
         .p_image_indices = @ptrCast(&image_idx),
-    });
+    }) catch |e|
+    switch (e) {
+        error.OutOfDateKHR => return reinit_swapchain(),
+        else => return e,
+    };
 }
 
 pub fn push_constant(comptime T: type, data: *const T) void {

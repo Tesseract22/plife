@@ -191,14 +191,11 @@ pub fn main(init: std.process.Init) !void {
     generate_particle(&particles, config.specie_ct, rand);
 
 
-    // TODO: handle window resize
-    const WINDOW_W = 1900;
-    const WINDOW_H = 1000;
     // const ASPECT_RATION = WINDOW_W/WINDOW_H;
     const APP_NAME = "Particle Life";
     _ = r.RGFW_init(APP_NAME, 0);
     const window = r.RGFW_createWindow(APP_NAME, 0, 0,
-        WINDOW_W, WINDOW_H, r.RGFW_windowCenter | r.RGFW_windowAllowDND)
+        1900, 1000, r.RGFW_windowCenter | r.RGFW_windowAllowDND)
         orelse @panic("cannot create window");
     r.RGFW_setBuildDND(1);
 
@@ -208,10 +205,11 @@ pub fn main(init: std.process.Init) !void {
     try vulkan.init_instance(arena);
     try vulkan.init_surface(window);
     // defer vulkan.cleanup();
-    const device = try vulkan.init_device(WINDOW_W, WINDOW_H);
+    const device = try vulkan.init_device(window);
     vulkan.init_queues(device);
-    try vulkan.init_swapchain(device);
-    try vulkan.init_image_views(device);
+    try vulkan.init_swapchain();
+    try vulkan.init_image_views();
+    try vulkan.init_hdr_texture();
     try vulkan.init_shader_modules();
     try vulkan.init_render_pass();
     try vulkan.init_hdr_render_pass();
@@ -264,7 +262,7 @@ pub fn main(init: std.process.Init) !void {
     try vulkan.init_pipeline();
     try vulkan.init_off_screen_pipeline();
     try vulkan.init_compute_pipeline();
-    _ = try vulkan.init_frame_buffers(arena, device);
+    try vulkan.init_frame_buffers();
 
     try vulkan.init_command_buffers(device);
     try vulkan.init_sync_primitives(device);
@@ -316,7 +314,6 @@ pub fn main(init: std.process.Init) !void {
             particle_constant.dt = dt/2.0;
         }
 
-        // FIXME: when window resized, we need to recreate swap chain
         r.RGFW_pollEvents();
 
         if (r.RGFW_isKeyDown(r.RGFW_keyA) == 1) {
@@ -394,7 +391,8 @@ pub fn main(init: std.process.Init) !void {
         particle_constant.camera.pos[1] = exp_smooth(particle_constant.camera.pos[1], camera_target.pos[1], dt * CAMERA_SMOOTH_SPD);
 
         const mouse_screen = get_mouse(window);
-        UI.frame.mouse = ((mouse_screen / V2 {WINDOW_W, WINDOW_H})*m.splat2(2) - m.splat2(1)) * V2{vulkan.state.aspect_ratio, 1};
+        const window_size = vulkan.state.window_size;
+        UI.frame.mouse = ((mouse_screen / V2 {@floatFromInt(window_size[0]), @floatFromInt(window_size[1])})*m.splat2(2) - m.splat2(1)) * V2{vulkan.state.aspect_ratio, 1};
         defer prev_mouse = UI.frame.mouse;
         UI.frame.mouse_delta = UI.frame.mouse-prev_mouse;
 
@@ -503,6 +501,8 @@ pub fn main(init: std.process.Init) !void {
                 layout.text("[Mouse Left/Right] Push/Pull");
                 layout.text("[W/A/S/D]          Camera Movement");
                 layout.text("[Mouse Whell]      Camera Zoom");
+                layout.text("[E]                Save Configuration to Clipboard");
+                layout.text("    Drag File Onto Screen To Load Configuration");
 
                 {
                     layout.spliter(spliter_w);
@@ -596,7 +596,7 @@ pub fn main(init: std.process.Init) !void {
 }
 
 const vulkan = @import("vulkan.zig");
-const r = @import("RGFW");
+const r = @import("c");
 const m = @import("math.zig");
 const font = @import("font.zig");
 const Configuration = @import("configuration.zig");
