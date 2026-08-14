@@ -1,7 +1,4 @@
 pub fn build(b: *std.Build) void {
-    var features = std.Target.Cpu.Feature.Set.empty;
-    features.addFeature(@intFromEnum(std.Target.spirv.Feature.variable_pointers_storage_buffer));
-    features.addFeature(@intFromEnum(std.Target.spirv.Feature.variable_pointers));
     const spirv_target = b.resolveTargetQuery(.{
         .cpu_arch = .spirv32,
         .os_tag = .vulkan,
@@ -9,7 +6,7 @@ pub fn build(b: *std.Build) void {
         // .cpu_features_add = features,
     });
 
-    const optimize = b.standardOptimizeOption(.{});
+    const optimize = b.standardOptimizeOption(.{ .preferred_optimize_mode = .small });
     const target = b.standardTargetOptions(.{});
     const mod = b.createModule(.{
         .optimize = optimize,
@@ -50,6 +47,7 @@ pub fn build(b: *std.Build) void {
         .name = "pasim",
         .root_module = mod,
     });
+    if (optimize != .debug) exe.subsystem = .windows;
     b.installArtifact(exe);
 }
 

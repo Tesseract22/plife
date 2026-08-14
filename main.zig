@@ -191,7 +191,6 @@ pub fn main(init: std.process.Init) !void {
     generate_particle(&particles, config.specie_ct, rand);
 
 
-    // const ASPECT_RATION = WINDOW_W/WINDOW_H;
     const APP_NAME = "Particle Life";
     _ = r.RGFW_init(APP_NAME, 0);
     const window = r.RGFW_createWindow(APP_NAME, 0, 0,
