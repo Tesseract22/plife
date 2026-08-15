@@ -17,21 +17,17 @@ pub fn build(b: *std.Build) void {
         .root_source_file = compile_shader(b, spirv_target, .debug, b.path("shader.zig"), "shader.spv"),
     });
 
-    const vulkan_path = b.graph.cwdRelativePath("C:/VulkanSDK/1.4.350.0/");
-    const vulkan_include = vulkan_path.path(b, "Include/");
-    const vulkan_lib = vulkan_path.path(b, "Lib");
+    if (b.systemIntegrationOption("vulkan", .{ .default = true })) {
+        mod.linkSystemLibrary("vulkan-1", .{});
+    } else @panic("vulkan intergration is needed");
 
-    mod.linkSystemLibrary("vulkan-1", .{});
-    mod.linkSystemLibrary("gdi32", .{});
-    mod.addLibraryPath(vulkan_lib);
-    mod.addSystemIncludePath(vulkan_include);
+    if (target.result.os.tag == .windows) mod.linkSystemLibrary("gdi32", .{});
 
     const translate_c =  b.addTranslateC(.{
         .target = target,
         .optimize = optimize,
         .root_source_file = b.path("c.h"),
     });
-    translate_c.addIncludePath(vulkan_include);
     mod.addImport("c", translate_c.createModule());
 
     mod.addCSourceFile(.{
@@ -44,7 +40,7 @@ pub fn build(b: *std.Build) void {
     });
 
     const exe = b.addExecutable(.{
-        .name = "pasim",
+        .name = "plife",
         .root_module = mod,
     });
     if (optimize != .debug) exe.subsystem = .windows;
@@ -66,7 +62,7 @@ fn compile_shader(
             .optimize = optimize,
         })
     });
-    b.installArtifact(exe);
+    // b.installArtifact(exe);
     return exe.getEmittedBin();
 }
 

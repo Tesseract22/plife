@@ -10,9 +10,9 @@ All of the [shaders](shader.zig) including the computing shaders are written usi
 0.17.0-dev.1471+ff10b90bc
 ```
 ```bash
-zig build -Drelease
+zig build -Drelease --search-prefix 'C:\VulkanSDK\1.4.350.0\'
 ```
-I have only tested it on x86-64-windows, though it should work on any major platform.
+I have only tested it on x86_64-windows, though it should work on any major platform.
 ### Dependencies
 All dependency is vendored.
 
