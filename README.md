@@ -3,7 +3,7 @@
 ![show case: spaceship](showcase/spaceship.png)
 ![show case: caterpillar](showcase/caterpillar.png)
 
-All of the [shaders](shader.zig) including the computing shaders are written using `zig`'s new SPIRV backend.
+All of the [shaders](shader.zig) including the computing shaders are written using `zig`'s [new SPIRV backend](https://ziggit.dev/t/spir-v-backend-progress-devlog/16351).
 ## Build
 ```bash
 > zig version
