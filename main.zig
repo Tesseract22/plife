@@ -297,6 +297,7 @@ pub fn main(init: std.process.Init) !void {
     while (r.RGFW_window_shouldClose(window) == 0) {
         _ = UI.frame.arena.reset(.retain_capacity);
         UI.frame.mouse_on_ui = false;
+        particle_constant.aspect_ratio = vulkan.state.aspect_ratio;
         // TODO: limit frame rate
         const start = std.Io.Timestamp.now(io, .boot);
         defer {
@@ -463,7 +464,7 @@ pub fn main(init: std.process.Init) !void {
             vulkan.end_camera();
             {
                 var layout = Layout { .x = 0, .y = -1+UI.theme.padding, .alignment = .center };
-                layout.text2(UI.theme.text_scale, annoucement.color, annoucement.text);
+                layout.text2(UI.theme.font_h, annoucement.color, annoucement.text);
                 annoucement.update(dt);
             }
             // Right Panel
@@ -490,7 +491,7 @@ pub fn main(init: std.process.Init) !void {
                 var layout = Layout { .x = draw.topleft()[0] + 0.01, .y = draw.topleft()[1], .alignment = .left };
                 const spliter_w = 0.75;
                 const title_color = [4]f32 {2,2,2,1};
-                const title_scale = UI.theme.text_scale*1.1;
+                const title_scale = UI.theme.font_h*1.1;
 
                 _ = layout.row(0);
                 layout.text2(title_scale, title_color, "Hot Keys"); _ = layout.row(0);
@@ -664,13 +665,13 @@ pub fn is_mouse_right_down() bool {
 pub const Theme = struct {
     line_thick : f32,
     text_color : [4]f32,
-    text_scale : f32,
+    font_h : f32,
     padding    : f32,
     btn_hover_color_mul  : f32,
     btn_pressed_color_mul: f32,
     slide_bar_w: f32,
     slide_bar_left_spacing: f32,
-    slide_bar_right_spacing: f32,
+    check_box_size: f32,
 };
 
 pub const UI = struct {
@@ -679,15 +680,16 @@ pub const UI = struct {
     pub const theme = Theme {
         .line_thick = 0.01,
         .text_color = .{0.8,0.8,0.8,1},
-        .text_scale = 2,
-        .padding = 0.02,
+        .font_h = 0.03,
+        .padding = 0.01,
 
         .btn_hover_color_mul = 3,
         .btn_pressed_color_mul = 0.7,
 
-        .slide_bar_w = 0.3,
-        .slide_bar_left_spacing = 0.15,
-        .slide_bar_right_spacing = 0.05,
+        .slide_bar_w = 0.5,
+        .slide_bar_left_spacing = 0.02,
+
+        .check_box_size = 0.05,
     };
     pub var frame: struct {
         arena: std.heap.ArenaAllocator = undefined,
@@ -706,10 +708,6 @@ pub const UI = struct {
     pub fn deinit() void {
         frame.arena.deinit();
         persistents.deinit();
-    }
-
-    pub fn font_h() f32 {
-        return draw.measure_font_h(theme.text_scale);
     }
 
     pub fn alloc_print(comptime fmt: []const u8, args: anytype) []const u8 {
@@ -745,7 +743,7 @@ pub const Layout = struct {
     }
 
     pub fn text(layout: *Layout, str: []const u8) void {
-        layout.text2(UI.theme.text_scale, UI.theme.text_color, str);
+        layout.text2(UI.theme.font_h, UI.theme.text_color, str);
     }
 
     pub fn text2(layout: *Layout, scale: f32, color: [4]f32, str: []const u8) void {
@@ -755,8 +753,8 @@ pub const Layout = struct {
         var aligned_pos = pos;
         switch (layout.alignment) {
             .left => {},
-            .center => aligned_pos[0] -= draw.measure_text(str, UI.theme.text_scale)[0]/2,
-            .right => aligned_pos[0] -= draw.measure_text(str, UI.theme.text_scale)[0],
+            .center => aligned_pos[0] -= draw.measure_text(str, UI.theme.font_h)[0]/2,
+            .right => aligned_pos[0] -= draw.measure_text(str, UI.theme.font_h)[0],
         }
         draw.text(aligned_pos, str, scale, color);
     }
@@ -773,19 +771,16 @@ pub const Layout = struct {
             ui.* = .{};
         }
 
-        const font_h = UI.font_h();
-        var pos = layout.row(font_h);
-
-        UI.text_fmt(pos, .left, "{d:.4}", .{left});
+        const font_h = UI.theme.font_h;
+        var pos = layout.row(font_h*1.5);
         pos[0] += UI.theme.slide_bar_left_spacing;
 
+        // UI.text_fmt(pos, .left, "{d:.4}", .{left});
         const slide_bar_w = UI.theme.slide_bar_w;
         const slide_rect = Rect {.pos=pos, .size=.{slide_bar_w, font_h}};
         draw.rectangle(slide_rect, .{0.3,0.3,0.3,1});
         slide_bar_btn(T, ui, slide_rect, left, right, left, right, val);
-        pos[0] += slide_bar_w + UI.theme.slide_bar_right_spacing;
-
-        UI.text_fmt(pos, .left, "{d:.4}", .{right});
+        // UI.text_fmt(pos, .left, "{d:.4}", .{right});
     }
 
     fn slide_bar_btn(comptime T: type, ui: *UI, slide_rect: Rect, left: T, right: T, clamp_left: T, clamp_right: T, val1: *T) void {
@@ -793,7 +788,7 @@ pub const Layout = struct {
 
         const pos = slide_rect.pos;
         const slide_bar_w = slide_rect.size[0];
-        const slide_btn_size = [2]f32 { slide_bar_w / 8.0, slide_rect.size[1] * 1.5 };
+        const slide_btn_size = [2]f32 { slide_rect.size[1], slide_rect.size[1] * 1.3 };
 
         const btn_rect = Rect.from_center(.{pos[0]+i*slide_bar_w, pos[1]+slide_rect.size[1]/2}, slide_btn_size);
         var btn_color: V4 = UI.theme.text_color;
@@ -827,10 +822,8 @@ pub const Layout = struct {
             ui2.* = .{};
         }
 
-        const font_h = UI.font_h();
+        const font_h = UI.theme.font_h;
         var pos = layout.row(font_h);
-
-        UI.text_fmt(pos, .left, "{d:.4}", .{left});
         pos[0] += UI.theme.slide_bar_left_spacing;
 
         const slide_bar_w = UI.theme.slide_bar_w;
@@ -839,17 +832,14 @@ pub const Layout = struct {
 
         slide_bar_btn(T, ui1, slide_rect, left, right, left, val2.* * 0.9, val1);
         slide_bar_btn(T, ui2, slide_rect, left, right, val1.* * 1.1, right, val2);
-
-        pos[0] += slide_bar_w + UI.theme.slide_bar_right_spacing;
-
-        UI.text_fmt(pos, .left, "{d:.4}", .{right});
     }
 
     pub fn check_box(layout: *Layout, checked: *bool, str: []const u8) bool {
-        const font_h = 0.05;
-        var pos = layout.row(font_h);
-        const size = m.splat2(font_h);
-        pos[0] += font_h/2.0;
+        const box_size = UI.theme.check_box_size;
+        var pos = layout.row(box_size);
+        const size = m.splat2(box_size);
+        pos[0] += box_size/2.0;
+        pos[1] += box_size/2.0;
         const check_box_rec = Rect.from_center(pos, size);
         const outline_check_box_rec = Rect.from_center(pos, size*m.splat2(0.75));
         const inner_check_box_rec = Rect.from_center(pos, size*m.splat2(0.5));
@@ -870,7 +860,8 @@ pub const Layout = struct {
             checked.* = !checked.*;
         }
 
-        pos[0] += font_h/2.0 + UI.theme.padding;
+        pos[0] += box_size/2.0 + UI.theme.padding;
+        pos[1] -= UI.theme.font_h/2.0;
         UI.text_fmt(pos, .left, "{s}", .{str});
         return changed;
     }

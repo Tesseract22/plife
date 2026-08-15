@@ -244,6 +244,18 @@ pub fn init_extent() !void {
             };
     state.aspect_ratio = @as(f32, @floatFromInt(state.extent.width)) / @as(f32, @floatFromInt(state.extent.height));
     log.info("window width={}, height={}, aspect_ratio={}", .{ state.extent.width, state.extent.height, state.aspect_ratio });
+
+    state.viewport = .{
+        .x = 0, .y = 0,
+        .width = @floatFromInt(state.extent.width),
+        .height = @floatFromInt(state.extent.height),
+        .min_depth = 0, .max_depth = 1,
+    };
+    state.scissor = .{
+        .offset = .{.x=0,.y=0},
+        .extent = state.extent,
+    };
+
 }
 
 pub fn init_device(win: *r.RGFW_window) !Device {
@@ -336,17 +348,6 @@ pub fn init_device(win: *r.RGFW_window) !Device {
     state.device_wrapper = v.DeviceWrapper.load(state.device_handle, state.instance.wrapper.dispatch.vkGetDeviceProcAddr.?);
     assert(state.device_wrapper.dispatch.vkCreateGraphicsPipelines != null);
     state.device = Device.init(state.device_handle, &state.device_wrapper);
-
-    state.viewport = .{
-        .x = 0, .y = 0,
-        .width = @floatFromInt(state.extent.width),
-        .height = @floatFromInt(state.extent.height),
-        .min_depth = 0, .max_depth = 1,
-    };
-    state.scissor = .{
-        .offset = .{.x=0,.y=0},
-        .extent = state.extent,
-    };
 
     state.mem_properties =
         state.instance.getPhysicalDeviceMemoryProperties(state.physical_device);
@@ -1744,28 +1745,24 @@ pub const Draw = struct {
     //     const pos = start - orthoganal_l * m.splat2(thick/2);
     // }
 
-    pub fn measure_font_h(scale: f32) f32 {
+    pub fn measure_text(str: []const u8, size: f32) [2]f32 {
         const font = state.font;
-        const pixel_scale = 1.0/@as(f32, @floatFromInt(state.extent.width)) * scale;
-        return pixel_scale * font.size/2;
-    }
-
-    pub fn measure_text(str: []const u8, scale: f32) [2]f32 {
-        const font = state.font;
-        const pixel_scale = 1.0/@as(f32, @floatFromInt(state.extent.width)) * scale;
+        const pixel_scale = size / font.size; // scale * pixel_size
         var local_pos: f32 = 0;
         for (str) |ch| {
             const packed_char = font.packed_chars[ch - font.code_first_char];
             const advance = packed_char.xadvance * pixel_scale;
             local_pos += advance;
         }
-        return .{local_pos, measure_font_h(scale)};
+        return .{local_pos, size};
     }
 
-    pub fn text(pos: [2]f32, str: []const u8, scale: f32, color: [4]f32) void {
+    pub fn text(pos: [2]f32, str: []const u8, size: f32, color: [4]f32) void {
         const font = state.font;
-        const pixel_scale = 1.0/@as(f32, @floatFromInt(state.extent.width)) * scale;
-        const font_h = pixel_scale * font.size/2;
+        // const pixel_size = 2.0/@as(f32, @floatFromInt(state.extent.height)); // how big is one pixel in normalized coordinate
+        // const scale = size / (pixel_size * font.size);
+        const pixel_scale = size / font.size; // scale * pixel_size
+        const font_h = font.size * pixel_scale;
 
         prepare_texture(font.bitmap.view);
 
